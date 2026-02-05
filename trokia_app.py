@@ -19,11 +19,13 @@ st.set_page_config(page_title="Trokia Ultimate", page_icon="💎", layout="wide"
 
 # --- 2. CONFIGURATION IA (VISION) ---
 try:
+    # On récupère la clé API depuis les secrets
     api_key = st.secrets["GEMINI_API_KEY"]
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel('gemini-pro-vision')
+    # On utilise le modèle Flash, rapide et efficace
+    model = genai.GenerativeModel('gemini-1.5-flash')
 except Exception as e:
-    st.warning("⚠️ L'IA n'est pas encore active. Vérifiez la clé API dans les Secrets.")
+    st.warning(f"⚠️ Erreur configuration IA: {e}")
 
 # --- 3. CONNEXION GOOGLE SHEETS ---
 def connecter_sheets():
@@ -33,13 +35,14 @@ def connecter_sheets():
         scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         client = gspread.authorize(creds)
+        # Ouvre le fichier "Trokia_DB" (Vérifie bien ce nom sur ton Drive)
         sheet = client.open("Trokia_DB").sheet1
         return sheet
     except Exception as e:
         st.error(f"Erreur de connexion Cloud : {e}")
         return None
 
-# --- 4. ROBOT RECHERCHE PRIX ---
+# --- 4. ROBOT RECHERCHE PRIX (EBAY) ---
 def configurer_navigateur():
     options = Options()
     options.add_argument("--headless=new") 
@@ -53,6 +56,7 @@ def analyser_prix_ebay(recherche):
         service = Service(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service, options=configurer_navigateur())
         
+        # Recherche uniquement les ventes RÉUSSIES
         url = "https://www.ebay.fr/sch/i.html?_nkw=" + recherche.replace(" ", "+") + "&LH_Sold=1&LH_Complete=1"
         driver.get(url)
         time.sleep(2)
@@ -65,13 +69,15 @@ def analyser_prix_ebay(recherche):
         except: pass
 
         texte = driver.find_element(By.TAG_NAME, "body").text
+        # Regex pour trouver les prix
         motifs = re.findall(r"(\d+[\.,]?\d*)\s*EUR", texte)
         
         prix_liste = []
         for p in motifs:
             try:
                 val = float(p.replace(',', '.').strip())
-                if 1 < val < 10000: 
+                # On filtre les prix aberrants (trop petits ou trop gros)
+                if 1 < val < 5000: 
                     prix_liste.append(val)
             except: continue
         
@@ -90,9 +96,11 @@ def analyser_prix_ebay(recherche):
 # --- 5. INTERFACE ---
 st.title("💎 Trokia Ultimate : Vision & Trader")
 
+# Connexion DB au démarrage
 sheet = connecter_sheets()
 if not sheet: st.stop()
 
+# Onglets
 tab1, tab2 = st.tabs(["🔍 Scan Texte", "📸 Analyse Photo (IA)"])
 
 # ONGLET 1 : TEXTE
@@ -105,11 +113,11 @@ with tab1:
             st.session_state.img = img
             st.session_state.nom = entree
 
-# ONGLET 2 : VISION IA (CAMÉRA OU UPLOAD)
+# ONGLET 2 : VISION IA
 with tab2:
     st.info("Analysez une photo prise maintenant ou depuis votre galerie.")
     
-    # Le choix magique
+    # Choix : Caméra ou Upload
     mode_photo = st.radio("Source de l'image :", ["📸 Caméra", "📂 Importer depuis la Galerie"], horizontal=True)
     
     image_data = None
@@ -119,7 +127,6 @@ with tab2:
     else:
         image_data = st.file_uploader("Choisir une image", type=['jpg', 'png', 'jpeg'])
     
-    # Traitement de l'image (peu importe la source)
     if image_data:
         img_pil = Image.open(image_data)
         st.image(img_pil, caption="Image à analyser", width=200)
@@ -127,7 +134,8 @@ with tab2:
         if st.button("🔍 Analyser cette image"):
             with st.spinner("🧠 L'IA analyse l'image..."):
                 try:
-                    prompt = "Tu es un expert en brocante. Identifie précisément cet objet (Marque, Modèle exact, Couleur) pour que je puisse chercher son prix sur eBay. Réponds UNIQUEMENT avec le nom court de l'objet."
+                    # Prompt optimisé pour Gemini
+                    prompt = "Tu es un expert en brocante. Identifie précisément cet objet (Marque, Modèle exact) pour recherche eBay. Réponds UNIQUEMENT avec le nom court."
                     response = model.generate_content([prompt, img_pil])
                     description = response.text.strip()
                     st.success(f"Objet identifié : **{description}**")
@@ -138,7 +146,7 @@ with tab2:
                         st.session_state.img = img 
                         st.session_state.nom = description
                 except Exception as e:
-                    st.error(f"L'IA n'a pas pu analyser l'image. Erreur : {e}")
+                    st.error(f"Erreur IA : {e}")
 
 # RÉSULTAT ET SAUVEGARDE
 if 'prix' in st.session_state and st.session_state.prix > 0:
@@ -164,7 +172,7 @@ if 'prix' in st.session_state and st.session_state.prix > 0:
                     st.session_state.nom, 
                     str(valeur).replace('.', ','), 
                     str(prix_achat).replace('.', ','), 
-                    "App Mobile", 
+                    "Mobile IA", 
                     st.session_state.img
                 ])
                 st.balloons()
@@ -174,5 +182,3 @@ if 'prix' in st.session_state and st.session_state.prix > 0:
                 st.rerun()
             except Exception as e:
                 st.error(f"Erreur de sauvegarde : {e}")
-
-
