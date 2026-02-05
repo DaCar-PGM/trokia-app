@@ -12,53 +12,84 @@ from serpapi import GoogleSearch
 import statistics
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="Trokia v17.3 : Debug Mode", page_icon="🐞", layout="wide")
+st.set_page_config(page_title="Trokia v17.4 : EAN Fix", page_icon="🎯", layout="wide")
 
-# --- 1. FONCTIONS ---
+# --- 1. FONCTIONS IA (Anti-Freeze inclus) ---
 def configurer_modele():
     try:
         api_key = st.secrets["GEMINI_API_KEY"]
         genai.configure(api_key=api_key)
         all_m = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        # On cherche le modèle Flash (rapide) ou Pro
         choix = next((m for m in all_m if "flash" in m.lower() and "1.5" in m), None)
         return choix if choix else all_m[0]
-    except Exception as e: return None
+    except: return None
 
 def analyser_image_multi(image_pil, modele):
     try:
-        if not modele: return [], "Erreur Clé API Gemini (Vérifie tes secrets)"
-        
         model = genai.GenerativeModel(modele)
-        # Prompt plus permissif
         prompt = "Analyse l'image. Donne la CATÉGORIE et 4 modèles précis. Format:\n1. [Marque Modèle]\n2. [Marque Modèle]..."
         response = model.generate_content([prompt, image_pil])
         text = response.text.strip()
-        
         propositions = []
         lines = text.split('\n')
         for l in lines:
             l = l.strip()
-            # On capture tout ce qui commence par un chiffre, un tiret ou une étoile
             if l and (l[0].isdigit() or l.startswith("-") or l.startswith("*")):
-                # Nettoyage : on vire le "1." ou "- " du début
                 clean_l = re.sub(r"^[\d\.\-\)\*]+\s*", "", l)
                 propositions.append(clean_l)
-        
-        if not propositions:
-            return [], f"L'IA a répondu mais format illisible : {text[:50]}..."
-            
         return propositions, None
     except Exception as e: return [], str(e)
 
+# --- 2. FONCTIONS DE RECHERCHE ---
+
+def identifier_ean_via_google(ean):
+    """
+    NOUVEAU : Convertit un code EAN (chiffres) en NOM (texte) via une recherche Google Standard.
+    Cela évite les erreurs de produits sur Google Shopping.
+    """
+    try:
+        params = {
+            "api_key": st.secrets["SERPAPI_KEY"],
+            "engine": "google",  # Recherche classique, pas shopping
+            "q": ean,
+            "google_domain": "google.fr",
+            "gl": "fr",
+            "hl": "fr"
+        }
+        search = GoogleSearch(params)
+        results = search.get_dict()
+        
+        # On regarde le titre du premier résultat organique
+        organic = results.get("organic_results", [])
+        if organic:
+            # On prend le titre du premier résultat (souvent le site de la marque ou Amazon)
+            titre_brut = organic[0].get("title", "")
+            # Petit nettoyage : on garde souvent ce qui est avant le tiret (ex: "iPhone 12 - Apple" -> "iPhone 12")
+            titre_propre = titre_brut.split(" - ")[0].split(" | ")[0]
+            return titre_propre
+    except Exception as e:
+        print(f"Erreur Identification EAN: {e}")
+    
+    return None # Si on trouve pas, on renverra l'EAN brut
+
 def scan_google_shopping_world(query):
     try:
-        if "SERPAPI_KEY" not in st.secrets: return {"count":0}, [], ""
+        # SÉCURITÉ EAN : Si c'est un code barre, on le traduit d'abord !
+        scan_query = query
+        is_ean = query.isdigit() and len(query) > 8
         
+        if is_ean:
+            with st.spinner(f"🕵️ Identification du produit EAN {query}..."):
+                nom_traduit = identifier_ean_via_google(query)
+                if nom_traduit:
+                    st.toast(f"Identifié : {nom_traduit}")
+                    scan_query = nom_traduit # On remplace le chiffre par le nom
+        
+        # Ensuite on lance le scan de prix sur le NOM (ou l'EAN si échec trad)
         params = {
             "api_key": st.secrets["SERPAPI_KEY"],
             "engine": "google_shopping",
-            "q": query,
+            "q": scan_query,
             "google_domain": "google.fr",
             "gl": "fr",
             "hl": "fr",
@@ -67,11 +98,6 @@ def scan_google_shopping_world(query):
         
         search = GoogleSearch(params)
         results = search.get_dict()
-        
-        if "error" in results:
-            print(f"Erreur SerpApi: {results['error']}")
-            return {"count":0}, [], ""
-
         shopping_results = results.get("shopping_results", [])
         
         prices = []
@@ -106,11 +132,12 @@ def scan_google_shopping_world(query):
             "med": statistics.median(prices) if prices else 0,
             "count": len(prices)
         }
-        return stats, clean_results, main_image
+        
+        # On retourne aussi le nom utilisé pour le scan
+        return stats, clean_results, main_image, scan_query
 
     except Exception as e:
-        print(f"Crash Scan: {e}")
-        return {"count":0}, [], ""
+        return {"count":0}, [], "", query
 
 # --- SHEETS ---
 def connecter_sheets():
@@ -131,7 +158,7 @@ def get_historique(sheet):
     return pd.DataFrame()
 
 # --- UI ---
-st.title("🐞 Trokia v17.3 : Debug Mode")
+st.title("🎯 Trokia v17.4 : Précision EAN")
 if 'modele_ia' not in st.session_state: st.session_state.modele_ia = configurer_modele()
 sheet = connecter_sheets()
 
@@ -139,12 +166,13 @@ def reset_all():
     st.session_state.nom_final = ""; st.session_state.go_search = False
     st.session_state.props = []; st.session_state.current_img = None
     st.session_state.scan_results = None
+    st.session_state.nom_reel_produit = "" # Pour stocker le nom traduit
 
 if 'nom_final' not in st.session_state: reset_all()
 
 # Header
 c_logo, c_btn = st.columns([4,1])
-c_logo.caption("Mode robuste activé")
+c_logo.caption("Scan Mondial + Traducteur Code-Barre")
 if c_btn.button("🔄 Reset Total"): reset_all(); st.rerun()
 
 # Onglets
@@ -154,29 +182,23 @@ with tab_photo:
     mode = st.radio("Source", ["Caméra", "Galerie"], horizontal=True, label_visibility="collapsed")
     f = st.camera_input("Photo") if mode == "Caméra" else st.file_uploader("Image")
     
-    # Bouton de secours si le chargement auto échoue
+    # Bouton de secours
     if f:
         if st.button("⚡ Forcer l'analyse (Si bloqué)", type="secondary"):
-            st.session_state.current_img = None # Force le rechargement
-            st.rerun()
+            st.session_state.current_img = None; st.rerun()
 
-    # Logique IA
     if f and st.session_state.current_img != f.name:
         st.session_state.current_img = f.name
         st.session_state.go_search = False 
         st.session_state.scan_results = None
         
-        with st.spinner("🤖 Identification IA en cours..."):
+        with st.spinner("🤖 Identification IA..."):
             p, err = analyser_image_multi(Image.open(f), st.session_state.modele_ia)
             if p: 
-                st.session_state.props = p
-                st.rerun()
+                st.session_state.props = p; st.rerun()
             else:
-                # ICI ON AFFICHE ENFIN L'ERREUR !
-                st.error(f"⚠️ L'IA a échoué : {err}")
-                st.info("Conseil : Réessayez ou passez en mode Manuel.")
+                st.error(f"⚠️ Erreur IA : {err}")
 
-    # Affichage Choix
     if st.session_state.props:
         st.write("##### 👇 Cliquez sur le bon modèle :")
         c1, c2 = st.columns(2)
@@ -186,35 +208,42 @@ with tab_photo:
                 st.session_state.nom_final = prop
                 st.session_state.go_search = True
                 st.rerun()
+        if st.button("Autre (Saisie Manuelle)"): st.warning("Utilisez l'onglet Manuel.")
 
 with tab_manuel:
     with st.form("man"):
-        q = st.text_input("Recherche ou EAN")
+        q = st.text_input("Recherche ou EAN", placeholder="Ex: 339189199222")
         if st.form_submit_button("🔎 Scanner") and q:
             st.session_state.nom_final = q; st.session_state.go_search = True; st.rerun()
 
 # RÉSULTATS
 if st.session_state.go_search and st.session_state.nom_final:
     st.divider()
-    st.markdown(f"### 🎯 Résultat : **{st.session_state.nom_final}**")
     
     if not st.session_state.scan_results:
-        with st.spinner("🌍 Scan Mondial (Google Shopping)..."):
-            stats, details, img_ref = scan_google_shopping_world(st.session_state.nom_final)
+        with st.spinner("🌍 Scan Mondial & Identification..."):
+            # On appelle la nouvelle fonction qui gère l'EAN
+            stats, details, img_ref, nom_reel = scan_google_shopping_world(st.session_state.nom_final)
             st.session_state.scan_results = (stats, details, img_ref)
+            st.session_state.nom_reel_produit = nom_reel
     
     if st.session_state.scan_results:
         stats, details, img_ref = st.session_state.scan_results
+        
+        # Titre dynamique (On montre le nom réel trouvé)
+        st.markdown(f"### 🎯 Résultat : **{st.session_state.nom_reel_produit}**")
+        
         if stats["count"] > 0:
             c_img, c_stats = st.columns([1, 3])
             if img_ref: c_img.image(img_ref, width=150)
             with c_stats:
                 k1, k2, k3 = st.columns(3)
-                k1.metric("Min", f"{stats['min']:.0f} €")
-                k2.metric("Médian", f"{stats['med']:.0f} €")
-                k3.metric("Max", f"{stats['max']:.0f} €")
+                k1.metric("Prix Bas", f"{stats['min']:.0f} €")
+                k2.metric("Médian (Cote)", f"{stats['med']:.0f} €", f"{stats['count']} offres")
+                k3.metric("Prix Haut", f"{stats['max']:.0f} €")
             
             st.write("---")
+            # Affichage offres sécurisé
             cols = st.columns(5)
             for i, item in enumerate(details[:10]):
                 with cols[i%5]:
@@ -228,14 +257,15 @@ if st.session_state.go_search and st.session_state.nom_final:
             cc1, cc2, cc3 = st.columns(3)
             pv = cc1.number_input("Vente (€)", value=float(stats['med'])); pa = cc2.number_input("Achat (€)", 0.0)
             marge = pv - pa - (pv*0.15)
-            cc3.metric("Marge", f"{marge:.2f} €", delta="Gain" if marge>0 else "Perte")
+            cc3.metric("Marge Nette", f"{marge:.2f} €", delta="Gain" if marge>0 else "Perte")
             
             if st.button("💾 Sauvegarder"):
                 if sheet:
-                    sheet.append_row([datetime.now().strftime("%d/%m"), st.session_state.nom_final, pv, pa, f"{marge:.2f}", img_ref])
+                    # On sauvegarde le NOM RÉEL, pas le code barre
+                    sheet.append_row([datetime.now().strftime("%d/%m"), st.session_state.nom_reel_produit, pv, pa, f"{marge:.2f}", img_ref])
                     st.balloons(); st.success("OK"); time.sleep(1); reset_all(); st.rerun()
         else:
-            st.warning("Rien trouvé. Vérifiez votre clé SerpApi ou essayez une autre recherche.")
+            st.warning("Aucun résultat. Vérifiez la clé SerpApi.")
 
 if sheet:
     df = get_historique(sheet)
