@@ -11,21 +11,21 @@ import re
 from serpapi import GoogleSearch
 import statistics
 
-# --- CONFIGURATION ---
-st.set_page_config(page_title="Trokia v17.8 : Cerveau Total", page_icon="🧠", layout="wide")
+# --- CONFIGURATION (v17.8) ---
+st.set_page_config(page_title="Trokia v17.8 : Multi-Images", page_icon="🧠", layout="wide")
 
-# --- 1. L'IA EN CASCADE (TA LISTE PERSONNALISÉE) ---
+# --- 1. L'IA EN CASCADE (MODIFIÉE POUR MULTI-IMAGES) ---
 
-def analyser_image_multi_cascade(image_pil):
+def analyser_image_multi_cascade(image_pil_list):
     """
-    Tente d'analyser l'image en utilisant ta liste de 30 modèles 
-    dans l'ordre du plus performant au plus stable.
+    Tente d'analyser une liste d'images (3-4 photos) 
+    en utilisant la cascade de modèles.
     """
     try:
         api_key = st.secrets["GEMINI_API_KEY"]
         genai.configure(api_key=api_key)
         
-        # TA LISTE MISE À JOUR (30 MODELES)
+        # TA LISTE DE MODÈLES (v17.8)
         CANDIDATS = [
             "gemini-2.5-flash", "gemini-2.5-pro", "gemini-3-flash-preview", 
             "gemini-3-pro-preview", "gemini-2.0-flash", "gemini-2.0-flash-001",
@@ -37,14 +37,14 @@ def analyser_image_multi_cascade(image_pil):
         last_error = ""
         for nom in CANDIDATS:
             try:
-                # Tentative avec le modèle
                 model = genai.GenerativeModel(nom)
-                prompt = "Analyse cette image produit. Donne la CATÉGORIE et 4 modèles précis. Format:\n1. [Marque Modèle]\n2. [Marque Modèle]..."
+                # Prompt adapté pour plusieurs angles de vue
+                prompt = "Analyse ces images produit (différents angles). Donne la CATÉGORIE et 4 modèles précis. Format:\n1. [Marque Modèle]\n2. [Marque Modèle]..."
                 
-                response = model.generate_content([prompt, image_pil])
+                # Envoi de la liste d'images
+                response = model.generate_content([prompt] + image_pil_list)
                 text = response.text.strip()
                 
-                # Extraction des résultats
                 propositions = []
                 lines = text.split('\n')
                 for l in lines:
@@ -59,30 +59,21 @@ def analyser_image_multi_cascade(image_pil):
                     
             except Exception as e:
                 last_error = str(e)
-                # Si erreur de quota (429), on attend un tout petit peu avant le prochain candidat
                 if "429" in last_error: time.sleep(1)
                 continue 
 
-        return [], f"Épuisement des 30 cerveaux. Dernière erreur : {last_error}"
+        return [], f"Épuisement des cerveaux. Dernière erreur : {last_error}"
     except Exception as e: return [], str(e)
 
-# --- 2. MOTEUR DE RECHERCHE EAN & PRIX ---
+# --- 2. MOTEUR DE RECHERCHE EAN & PRIX (v17.8) ---
 
 def identifier_ean_via_google(ean):
     try:
-        params = {
-            "api_key": st.secrets["SERPAPI_KEY"],
-            "engine": "google",
-            "q": ean,
-            "google_domain": "google.fr",
-            "gl": "fr", "hl": "fr"
-        }
+        params = {"api_key": st.secrets["SERPAPI_KEY"], "engine": "google", "q": ean, "gl": "fr", "hl": "fr"}
         search = GoogleSearch(params)
         results = search.get_dict()
         organic = results.get("organic_results", [])
-        if organic:
-            titre = organic[0].get("title", "")
-            return titre.split(" - ")[0].split(" | ")[0]
+        if organic: return organic[0].get("title", "").split(" - ")[0].split(" | ")[0]
     except: pass
     return None
 
@@ -106,9 +97,7 @@ def scan_google_shopping_world(query):
         results = search.get_dict()
         shopping_results = results.get("shopping_results", [])
         
-        prices = []
-        clean_results = []
-        main_image = ""
+        prices = []; clean_results = []; main_image = ""
         
         for item in shopping_results:
             prix_txt = str(item.get("price", "0")).replace("\xa0€", "").replace("€", "").replace(",", ".").strip()
@@ -136,7 +125,7 @@ def scan_google_shopping_world(query):
         return stats, clean_results, main_image, scan_query
     except Exception as e: return {"count":0}, [], "", query
 
-# --- 3. BASE DE DONNÉES ---
+# --- 3. BASE DE DONNÉES (v17.8) ---
 
 def connecter_sheets():
     try:
@@ -157,24 +146,32 @@ def reset_all():
 
 if 'nom_final' not in st.session_state: reset_all()
 
-st.title("🧠 Trokia v17.8 : L'IA Sans Limite")
+st.title("🧠 Trokia v17.8 : Multi-Images")
 
-# Header navigation
 c1, c2 = st.columns([4,1])
-c1.caption(f"Connecté aux 30 modèles Gemini | Mode Mondial Activé")
+c1.caption(f"Analyse multi-photos activée | Cascade des 30 modèles")
 if c2.button("🔄 Nouveau"): reset_all(); st.rerun()
 
-# ONGLETS
 t_ia, t_man = st.tabs(["📸 SCAN IA", "⌨️ MANUEL / EAN"])
 
 with t_ia:
-    f = st.camera_input("Scanner l'objet")
-    if f and st.session_state.current_img != f.name:
-        st.session_state.current_img = f.name
-        with st.spinner("🤖 Recherche du meilleur cerveau disponible..."):
-            p, err = analyser_image_multi_cascade(Image.open(f))
-            if p: st.session_state.props = p; st.rerun()
-            else: st.error(err)
+    # MODIFICATION : On autorise plusieurs fichiers
+    uploaded_files = st.file_uploader("Prendre 3 ou 4 photos du produit", accept_multiple_files=True, type=['png', 'jpg', 'jpeg'])
+    
+    if uploaded_files:
+        # Affichage des photos chargées
+        imgs_pil = [Image.open(f) for f in uploaded_files]
+        cols = st.columns(len(imgs_pil))
+        for i, img in enumerate(imgs_pil):
+            cols[i].image(img, use_container_width=True)
+
+        if st.button("🧠 Lancer l'analyse des photos", type="primary", use_container_width=True):
+            with st.spinner("🤖 Recherche du meilleur cerveau..."):
+                p, err = analyser_image_multi_cascade(imgs_pil)
+                if p: 
+                    st.session_state.props = p
+                else: 
+                    st.error(err)
 
     if st.session_state.props:
         st.write("##### Cliquez sur le modèle identique :")
@@ -190,11 +187,11 @@ with t_man:
         if st.form_submit_button("Lancer l'analyse") and q:
             st.session_state.nom_final = q; st.session_state.go_search = True; st.rerun()
 
-# RÉSULTATS
+# RÉSULTATS (v17.8)
 if st.session_state.go_search and st.session_state.nom_final:
     st.divider()
     if not st.session_state.scan_results:
-        with st.spinner("🌍 Scan des marchés européens en cours..."):
+        with st.spinner("🌍 Scan des marchés..."):
             stats, details, img_ref, nom_reel = scan_google_shopping_world(st.session_state.nom_final)
             st.session_state.scan_results = (stats, details, img_ref)
             st.session_state.nom_reel_produit = nom_reel
@@ -208,7 +205,7 @@ if st.session_state.go_search and st.session_state.nom_final:
             with cs:
                 k1, k2, k3 = st.columns(3)
                 k1.metric("Prix Bas", f"{stats['min']:.0f} €")
-                k2.metric("Médian (Marché)", f"{stats['med']:.0f} €", f"{stats['count']} offres")
+                k2.metric("Médian", f"{stats['med']:.0f} €")
                 k3.metric("Prix Haut", f"{stats['max']:.0f} €")
             
             st.write("---")
@@ -216,8 +213,7 @@ if st.session_state.go_search and st.session_state.nom_final:
             for i, item in enumerate(details[:10]):
                 with c_offres[i%5]:
                     st.metric(item["source"], f"{item['prix']:.0f} €")
-                    st.caption(item["titre"][:20])
-                    if item["lien"]: st.link_button("Lien", item["lien"])
+                    if item["lien"]: st.link_button("Voir", item["lien"])
             
             st.write("---")
             calc1, calc2, calc3 = st.columns(3)
@@ -226,7 +222,7 @@ if st.session_state.go_search and st.session_state.nom_final:
             marge = pv - pa - (pv * 0.15)
             calc3.metric("Marge Nette", f"{marge:.2f} €")
             
-            if st.button("💾 Enregistrer dans l'inventaire", use_container_width=True):
+            if st.button("💾 Enregistrer", use_container_width=True):
                 if sheet:
                     sheet.append_row([datetime.now().strftime("%d/%m"), st.session_state.nom_reel_produit, pv, pa, f"{marge:.2f}", img_ref])
                     st.balloons(); st.success("Enregistré !"); time.sleep(1); reset_all(); st.rerun()
