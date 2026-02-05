@@ -12,7 +12,7 @@ from serpapi import GoogleSearch
 import statistics
 
 # --- CONFIGURATION ULTIME ---
-st.set_page_config(page_title="Trokia v17 : World Scan", page_icon="🌍", layout="wide")
+st.set_page_config(page_title="Trokia v17.1 : World Scan (Stable)", page_icon="🌍", layout="wide")
 
 # --- 1. FONCTIONS IA & UTILITAIRES ---
 def configurer_modele():
@@ -37,21 +37,17 @@ def analyser_image_multi(image_pil, modele):
         return propositions, None
     except Exception as e: return [], str(e)
 
-# --- 2. LE NOUVEAU MOTEUR MONDIAL (SerpApi/Google Shopping) ---
+# --- 2. MOTEUR MONDIAL ROBUSTE ---
 def scan_google_shopping_world(query):
-    """
-    Interroge Google Shopping pour avoir une vue globale du marché européen.
-    Nécessite la clé SERPAPI_KEY dans les secrets Streamlit.
-    """
     try:
         params = {
             "api_key": st.secrets["SERPAPI_KEY"],
             "engine": "google_shopping",
             "q": query,
-            "google_domain": "google.fr", # On cible le marché FR/Europe
+            "google_domain": "google.fr",
             "gl": "fr",
             "hl": "fr",
-            "num": "20" # On récupère les 20 meilleurs résultats
+            "num": "20"
         }
         
         search = GoogleSearch(params)
@@ -63,25 +59,30 @@ def scan_google_shopping_world(query):
         main_image = ""
         
         for item in shopping_results:
-            # Extraction propre du prix
-            prix_txt = item.get("price", "0").replace("\xa0€", "").replace("€", "").replace(",", ".").strip()
+            # Extraction Prix Sécurisée
+            prix_txt = str(item.get("price", "0")).replace("\xa0€", "").replace("€", "").replace(",", ".").strip()
             try:
-                p_float = float(re.findall(r"(\d+[\.,]?\d*)", prix_txt)[0])
-                if p_float > 1: prices.append(p_float)
+                found = re.findall(r"(\d+[\.,]?\d*)", prix_txt)
+                if found:
+                    p_float = float(found[0])
+                    if p_float > 1: prices.append(p_float)
+                else: p_float = 0
             except: p_float = 0
             
-            # On prend la première belle image comme référence
             if not main_image and item.get("thumbnail"):
                 main_image = item.get("thumbnail")
 
+            # On sécurise le lien pour qu'il ne soit jamais None
+            link_final = item.get("link")
+            if not link_final: link_final = item.get("product_link", "")
+
             clean_results.append({
-                "source": item.get("source", "Inconnu"),
+                "source": item.get("source", "Marché Web"),
                 "prix": p_float,
-                "lien": item.get("link"),
-                "titre": item.get("title")
+                "lien": link_final, # Peut être "" mais pas None
+                "titre": item.get("title", "Sans titre")
             })
             
-        # Calculs statistiques
         stats = {
             "min": min(prices) if prices else 0,
             "max": max(prices) if prices else 0,
@@ -91,6 +92,7 @@ def scan_google_shopping_world(query):
         return stats, clean_results, main_image
 
     except Exception as e:
+        # En cas de crash API total, on ne plante pas l'app
         print(f"Erreur SerpApi: {e}")
         return {"min":0, "med":0, "max":0, "count":0}, [], ""
 
@@ -115,7 +117,7 @@ def get_historique(sheet):
     return pd.DataFrame()
 
 # --- UI ---
-st.title("🌍 Trokia v17 : World Scan")
+st.title("🌍 Trokia v17.1 : World Scan (Stable)")
 if 'modele_ia' not in st.session_state: st.session_state.modele_ia = configurer_modele()
 sheet = connecter_sheets()
 
@@ -154,53 +156,58 @@ with tab_manuel:
         if st.form_submit_button("🔎 Scanner le Monde") and q:
             st.session_state.nom_final = q; st.session_state.go_search = True; st.rerun()
 
-# RÉSULTATS DU SCAN MONDIAL
+# RÉSULTATS
 if st.session_state.go_search and st.session_state.nom_final:
     st.divider()
     st.markdown(f"### 🎯 Analyse Globale : **{st.session_state.nom_final}**")
     
-    with st.spinner("🌍 Interrogation des marchés européens via Google Shopping..."):
+    with st.spinner("🌍 Interrogation des marchés européens..."):
         stats, details, img_ref = scan_google_shopping_world(st.session_state.nom_final)
         st.session_state.scan_results = (stats, details, img_ref)
 
     if stats["count"] > 0:
-        # Affichage Image + Stats Clés
         c_img, c_stats = st.columns([1, 3])
         if img_ref: c_img.image(img_ref, width=150, caption="Réf. Google")
         
         with c_stats:
             k1, k2, k3 = st.columns(3)
-            k1.metric("Prix Bas (Opportunité)", f"{stats['min']:.0f} €")
-            k2.metric("Prix Médian (La Vraie Cote)", f"{stats['med']:.0f} €", f"{stats['count']} offres scannées")
-            k3.metric("Prix Haut (Pro)", f"{stats['max']:.0f} €")
+            k1.metric("Prix Bas", f"{stats['min']:.0f} €")
+            k2.metric("Prix Médian", f"{stats['med']:.0f} €", f"{stats['count']} offres")
+            k3.metric("Prix Haut", f"{stats['max']:.0f} €")
         
-        # Détail des offres (Top 5 pour pas polluer)
         st.write("---")
-        st.write("##### 🔎 Détail des meilleures offres trouvées :")
+        st.write("##### 🔎 Détail des offres :")
+        
+        # CORRECTION DU BUG D'AFFICHAGE ICI
         cols_offres = st.columns(5)
-        for i, item in enumerate(details[:5]):
-            with cols_offres[i]:
+        for i, item in enumerate(details[:10]): # On affiche max 10 offres
+            with cols_offres[i % 5]: # Modulo pour revenir à la ligne proprement
                 st.metric(item["source"], f"{item['prix']:.0f} €")
-                st.caption(item["titre"][:30]+"...")
-                st.link_button("Voir", item["lien"])
+                st.caption(item["titre"][:25]+"...")
+                
+                # SÉCURITÉ BOUTON : Si pas de lien, bouton désactivé
+                if item["lien"] and item["lien"].startswith("http"):
+                    st.link_button("Voir", item["lien"])
+                else:
+                    st.button("Pas de lien", disabled=True, key=f"no_link_{i}")
+                
+                st.divider()
 
-        # Calculateur Marge
         st.write("---")
-        st.markdown("#### 💰 Calculateur de Marge Nette")
+        st.markdown("#### 💰 Calculateur de Marge")
         cc1, cc2, cc3 = st.columns(3)
         pv = cc1.number_input("Vente (€)", value=float(stats['med']), step=1.0)
         pa = cc2.number_input("Achat (€)", 0.0, step=1.0)
         marge = pv - pa - (pv * 0.15)
-        cc3.metric("Profit Net Estimé", f"{marge:.2f} €", delta="Gagnant" if marge > 0 else "Perdant")
+        cc3.metric("Profit Net", f"{marge:.2f} €", delta="Gagnant" if marge > 0 else "Perdant")
 
-        if st.button("💾 Sauvegarder ce Scan", use_container_width=True):
+        if st.button("💾 Sauvegarder", use_container_width=True):
             if sheet:
                 sheet.append_row([datetime.now().strftime("%d/%m %H:%M"), st.session_state.nom_final, pv, pa, f"{marge:.2f}", img_ref])
                 st.balloons(); st.success("Sauvegardé !"); time.sleep(1); reset_all(); st.rerun()
     else:
-        st.warning("Aucun résultat probant trouvé sur Google Shopping pour cette recherche.")
+        st.warning("Aucun résultat trouvé sur Google Shopping. Essayez un autre terme.")
 
-# Historique
 if sheet:
     df = get_historique(sheet)
     if not df.empty: st.write("---"); st.write("### 📋 Historique"); st.dataframe(df, use_container_width=True, hide_index=True)
