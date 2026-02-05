@@ -12,7 +12,7 @@ import requests
 from bs4 import BeautifulSoup
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="Trokia v13.1 : Visual Fix", page_icon="👁️", layout="wide")
+st.set_page_config(page_title="Trokia v13.2 : Visual Fixed", page_icon="👁️", layout="wide")
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -35,7 +35,7 @@ def analyser_image_multi(image_pil, modele):
         model = genai.GenerativeModel(modele)
         prompt = (
             "Analyse cette image. Donne-moi la CATÉGORIE (VETEMENT, MEUBLE, TECH, AUTRE)."
-            "Liste 4 propositions de modèles précis qui pourraient correspondre visuellement."
+            "Liste 4 propositions de modèles précis."
             "Format:\nCAT: ...\n1. ...\n2. ...\n3. ...\n4. ..."
         )
         response = model.generate_content([prompt, image_pil])
@@ -49,26 +49,35 @@ def analyser_image_multi(image_pil, modele):
         return propositions, cat, None
     except Exception as e: return [], "AUTRE", str(e)
 
-# --- 2. RECUPERATION VISUELLE (CORRIGÉE) ---
+# --- 2. RECUPERATION VISUELLE (ROBUSTE) ---
 def get_thumbnail(query):
-    """Récupère l'image réelle en contournant le lazy-loading d'eBay"""
+    """
+    Version Améliorée : Scanne plusieurs items et filtre les 'pixels invisibles' (.gif)
+    """
     try:
         clean = re.sub(r'[^\w\s]', '', query).strip()
         url = f"https://www.ebay.fr/sch/i.html?_nkw={clean.replace(' ', '+')}"
-        r = requests.get(url, headers=HEADERS, timeout=4)
+        r = requests.get(url, headers=HEADERS, timeout=5)
         soup = BeautifulSoup(r.text, 'html.parser')
         
-        # On cherche l'item image
-        img_tag = soup.select_one('.s-item__image-wrapper img')
+        # On regarde les 5 premiers résultats pour trouver une vraie image
+        items = soup.select('.s-item')
         
-        if img_tag:
-            # ASTUCE : eBay cache souvent la vraie image dans 'data-src' ou 'data-img-src'
-            if img_tag.get('data-src'): return img_tag.get('data-src')
-            if img_tag.get('src'): return img_tag.get('src')
+        for item in items:
+            # On cherche l'image dans cet item
+            img_tag = item.select_one('.s-item__image-img')
+            if not img_tag: img_tag = item.select_one('img')
             
+            if img_tag:
+                # On teste src et data-src
+                candidates = [img_tag.get('data-src'), img_tag.get('src')]
+                for src in candidates:
+                    # LE FILTRE MAGIQUE : Doit être une URL, contenir 'ebayimg' et PAS être un GIF
+                    if src and src.startswith('http') and 'ebayimg.com' in src and '.gif' not in src:
+                        return src
+                        
     except: pass
-    # Image par défaut si rien trouvé (Un carré gris propre)
-    return "https://via.placeholder.com/300x300.png?text=Image+Non+Dispo"
+    return "https://via.placeholder.com/300x200.png?text=Image+Introuvable"
 
 def generer_lien(nom, site): return f"https://www.google.com/search?q=site:{site}+{nom.replace(' ', '+')}"
 
@@ -88,11 +97,16 @@ def scan_ebay(recherche):
         prices = [float(p.replace(",", ".").replace(" ", "")) for p in re.findall(r"(?:EUR|€)\s*([\d\s\.,]+)|([\d\s\.,]+)\s*(?:EUR|€)", r.text) for x in p if x and 2 < float(x.replace(",", ".").replace(" ", "")) < 5000]
         soup = BeautifulSoup(r.text, 'html.parser')
         
-        # Correction aussi ici pour l'image finale
+        # Extraction image principale aussi corrigée
         img_url = ""
-        img_tag = soup.select_one('.s-item__image-wrapper img')
-        if img_tag:
-            img_url = img_tag.get('data-src') if img_tag.get('data-src') else img_tag.get('src')
+        items = soup.select('.s-item')
+        for item in items:
+             img_tag = item.select_one('.s-item__image-img')
+             if img_tag:
+                 cand = img_tag.get('data-src') or img_tag.get('src')
+                 if cand and 'ebayimg.com' in cand:
+                     img_url = cand
+                     break
             
         return (sum(prices)/len(prices) if prices else 0), len(prices), img_url, url
     except: return 0, 0, "", ""
@@ -119,7 +133,7 @@ def get_historique(sheet):
     return pd.DataFrame()
 
 # --- UI ---
-st.title("💼 Trokia v13.1 : Visual Selector")
+st.title("💼 Trokia v13.2 : Visual Selector (Corrigé)")
 
 if 'modele_ia' not in st.session_state: st.session_state.modele_ia = configurer_modele()
 sheet = connecter_sheets()
@@ -151,7 +165,7 @@ if f:
                 st.session_state.props = p
                 st.session_state.cat = c
                 
-                with st.spinner("📸 Récupération des images (Mode Lazy-Load)..."):
+                with st.spinner("📸 Récupération des vraies photos..."):
                     imgs = []
                     for prop in p:
                         imgs.append(get_thumbnail(prop))
@@ -166,7 +180,7 @@ if f:
         
         for i, col in enumerate(cols):
             with col:
-                # Affichage image corrigé
+                # Affichage image avec un fallback si la liste est plus courte
                 if i < len(st.session_state.props_imgs):
                     st.image(st.session_state.props_imgs[i], use_container_width=True)
                 st.caption(f"**{st.session_state.props[i]}**")
