@@ -15,48 +15,43 @@ from selenium.webdriver.common.by import By
 from webdriver_manager.chrome import ChromeDriverManager
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="Trokia Final", page_icon="💎", layout="wide")
+st.set_page_config(page_title="Trokia Diagnostic", page_icon="🔧", layout="wide")
 
-# --- IA SETUP ---
-def configurer_ia():
+# --- 1. FONCTION DIAGNOSTIC ---
+def lister_modeles_dispos():
+    """Demande à Google la liste EXACTE des modèles disponibles pour cette clé."""
     try:
         api_key = st.secrets["GEMINI_API_KEY"]
         genai.configure(api_key=api_key)
-    except:
-        st.error("Manque la clé API !")
+        
+        # On récupère tous les modèles qui supportent 'generateContent'
+        liste = []
+        for m in genai.list_models():
+            if 'generateContent' in m.supported_generation_methods:
+                liste.append(m.name)
+        return sorted(liste), None
+    except Exception as e:
+        return [], str(e)
 
-def analyser_image(image_pil):
-    # On utilise le modèle le plus récent (compatible avec la nouvelle librairie)
+# --- 2. IA ---
+def analyser_image_avec_modele(image_pil, nom_modele):
     try:
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        model = genai.GenerativeModel(nom_modele)
         response = model.generate_content(["Décris cet objet (Marque, Modèle) pour eBay. Nom court uniquement.", image_pil])
         return response.text.strip(), None
     except Exception as e:
         return None, str(e)
 
-# --- GOOGLE SHEETS ---
-def connecter_sheets():
-    try:
-        json_str = st.secrets["service_account_info"]
-        creds_dict = json.loads(json_str)
-        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-        client = gspread.authorize(creds)
-        return client.open("Trokia_DB").sheet1
-    except: return None
-
-# --- SCRAPING ---
-def get_driver():
-    options = Options()
-    options.add_argument("--headless=new") 
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    service = Service(ChromeDriverManager().install())
-    return webdriver.Chrome(service=service, options=options)
-
+# --- 3. ROBOT EBAY ---
 def analyser_prix_ebay(recherche):
     try:
-        driver = get_driver()
+        options = Options()
+        options.add_argument("--headless=new") 
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        service = Service(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=options)
+        
         driver.get("https://www.ebay.fr/sch/i.html?_nkw=" + recherche.replace(" ", "+") + "&LH_Sold=1&LH_Complete=1")
         time.sleep(2)
         
@@ -70,11 +65,35 @@ def analyser_prix_ebay(recherche):
         return (sum(prix) / len(prix) if prix else 0), img
     except: return 0, ""
 
-# --- INTERFACE ---
-st.title("💎 Trokia : Version Finale")
-configurer_ia()
-sheet = connecter_sheets()
+# --- 4. CONNEXION SHEETS ---
+def connecter_sheets():
+    try:
+        json_str = st.secrets["service_account_info"]
+        creds_dict = json.loads(json_str)
+        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        client = gspread.authorize(creds)
+        return client.open("Trokia_DB").sheet1
+    except: return None
 
+# --- INTERFACE ---
+st.title("🔧 Trokia : Mode Diagnostic & Réparation")
+
+# Vérification immédiate des modèles
+st.info("🔄 Connexion à Google pour vérifier votre compte...")
+modeles_dispos, erreur_liste = lister_modeles_dispos()
+
+if erreur_liste:
+    st.error(f"❌ Impossible de lister les modèles : {erreur_liste}")
+    choix_modele = None
+else:
+    st.success(f"✅ {len(modeles_dispos)} modèles trouvés et actifs !")
+    # On laisse l'utilisateur choisir le modèle (fini de deviner !)
+    choix_modele = st.selectbox("Quel cerveau utiliser ?", modeles_dispos, index=0)
+
+st.divider()
+
+sheet = connecter_sheets()
 tab1, tab2 = st.tabs(["Scan Texte", "Scan Photo"])
 
 with tab1:
@@ -88,16 +107,19 @@ with tab2:
     f = st.camera_input("Photo") if mode == "Caméra" else st.file_uploader("Image")
     
     if f and st.button("Analyser IA ✨"):
-        img = Image.open(f)
-        st.image(img, width=150)
-        with st.spinner("Analyse..."):
-            desc, err = analyser_image(img)
-            if desc:
-                st.success(f"Trouvé : {desc}")
-                p, i = analyser_prix_ebay(desc)
-                st.session_state.res = {'p': p, 'i': i, 'n': desc}
-            else:
-                st.error(f"Erreur IA : {err}")
+        if not choix_modele:
+            st.error("Aucun modèle disponible.")
+        else:
+            img = Image.open(f)
+            st.image(img, width=150)
+            with st.spinner(f"Analyse avec {choix_modele}..."):
+                desc, err = analyser_image_avec_modele(img, choix_modele)
+                if desc:
+                    st.success(f"Trouvé : {desc}")
+                    p, i = analyser_prix_ebay(desc)
+                    st.session_state.res = {'p': p, 'i': i, 'n': desc}
+                else:
+                    st.error(f"Erreur IA : {err}")
 
 if 'res' in st.session_state:
     r = st.session_state.res
@@ -107,5 +129,6 @@ if 'res' in st.session_state:
     with c2:
         st.metric("Prix eBay", f"{r['p']:.2f} €")
         if st.button("Sauvegarder"):
-            sheet.append_row([datetime.now().str(), r['n'], r['p'], 0, "V2.2", r['i']])
-            st.success("Sauvegardé !")
+            if sheet:
+                sheet.append_row([datetime.now().str(), r['n'], r['p'], 0, "Diag", r['i']])
+                st.success("Sauvegardé !")
