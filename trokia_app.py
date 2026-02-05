@@ -15,38 +15,57 @@ from selenium.webdriver.common.by import By
 from webdriver_manager.chrome import ChromeDriverManager
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="Trokia Ultimate", page_icon="💎", layout="wide")
+st.set_page_config(page_title="Trokia Diagnostic", page_icon="🔧", layout="wide")
 
-# --- 1. IA (Configuration Optimale Gratuite) ---
-def configurer_ia():
+# --- 1. FONCTION DIAGNOSTIC ---
+def lister_modeles_dispos():
+    """Demande à Google la liste EXACTE des modèles disponibles pour cette clé."""
     try:
         api_key = st.secrets["GEMINI_API_KEY"]
         genai.configure(api_key=api_key)
-    except:
-        st.error("Manque la clé API !")
+        
+        # On récupère tous les modèles qui supportent 'generateContent'
+        liste = []
+        for m in genai.list_models():
+            if 'generateContent' in m.supported_generation_methods:
+                liste.append(m.name)
+        return sorted(liste), None
+    except Exception as e:
+        return [], str(e)
 
-def analyser_image(image_pil):
-    # On force le modèle FLASH qui est généreux en quota gratuit
-    modeles_gratuits = ['gemini-1.5-flash', 'gemini-1.5-flash-latest', 'gemini-1.0-pro-vision-latest']
-    
-    last_error = ""
-    for nom_modele in modeles_gratuits:
-        try:
-            model = genai.GenerativeModel(nom_modele)
-            # Prompt optimisé pour la revente
-            prompt = "Tu es un expert eBay. Analyse cette photo. Donne-moi UNIQUEMENT le titre parfait pour l'annonce (Marque, Modèle exact, Couleur). Sois précis."
-            response = model.generate_content([prompt, image_pil])
-            return response.text.strip(), None
-        except Exception as e:
-            last_error = str(e)
-            if "429" in str(e):
-                time.sleep(2) # Petite pause si quota atteint
-                continue
-            continue
-            
-    return None, f"Tous les modèles gratuits sont occupés ou bloqués. Erreur : {last_error}"
+# --- 2. IA ---
+def analyser_image_avec_modele(image_pil, nom_modele):
+    try:
+        model = genai.GenerativeModel(nom_modele)
+        response = model.generate_content(["Décris cet objet (Marque, Modèle) pour eBay. Nom court uniquement.", image_pil])
+        return response.text.strip(), None
+    except Exception as e:
+        return None, str(e)
 
-# --- 2. GOOGLE SHEETS ---
+# --- 3. ROBOT EBAY ---
+def analyser_prix_ebay(recherche):
+    try:
+        options = Options()
+        options.add_argument("--headless=new") 
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        service = Service(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=options)
+        
+        driver.get("https://www.ebay.fr/sch/i.html?_nkw=" + recherche.replace(" ", "+") + "&LH_Sold=1&LH_Complete=1")
+        time.sleep(2)
+        
+        try: img = driver.find_element(By.CSS_SELECTOR, "div.s-item__image-wrapper img").get_attribute("src")
+        except: img = "https://via.placeholder.com/150"
+
+        txt = driver.find_element(By.TAG_NAME, "body").text
+        prix = [float(p.replace(',', '.').strip()) for p in re.findall(r"(\d+[\.,]?\d*)\s*EUR", txt) if 1 < float(p.replace(',', '.')) < 5000]
+        
+        driver.quit()
+        return (sum(prix) / len(prix) if prix else 0), img
+    except: return 0, ""
+
+# --- 4. CONNEXION SHEETS ---
 def connecter_sheets():
     try:
         json_str = st.secrets["service_account_info"]
@@ -57,98 +76,59 @@ def connecter_sheets():
         return client.open("Trokia_DB").sheet1
     except: return None
 
-# --- 3. SCRAPING PRIX ---
-def get_driver():
-    options = Options()
-    options.add_argument("--headless=new") 
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    service = Service(ChromeDriverManager().install())
-    return webdriver.Chrome(service=service, options=options)
-
-def analyser_prix_ebay(recherche):
-    try:
-        driver = get_driver()
-        # Recherche ventes réussies + term exact
-        url = "https://www.ebay.fr/sch/i.html?_nkw=" + recherche.replace(" ", "+") + "&LH_Sold=1&LH_Complete=1"
-        driver.get(url)
-        time.sleep(2)
-        
-        try: img = driver.find_element(By.CSS_SELECTOR, "div.s-item__image-wrapper img").get_attribute("src")
-        except: img = "https://via.placeholder.com/150"
-
-        txt = driver.find_element(By.TAG_NAME, "body").text
-        # Nettoyage des prix
-        prix = []
-        for p in re.findall(r"(\d+[\.,]?\d*)\s*EUR", txt):
-            val = float(p.replace(',', '.').strip())
-            if 1 < val < 5000: prix.append(val)
-        
-        driver.quit()
-        if prix:
-            moyenne = sum(prix) / len(prix)
-            return moyenne, img
-        return 0, ""
-    except: return 0, ""
-
 # --- INTERFACE ---
-st.title("💎 Trokia : Prêt à l'emploi")
-configurer_ia()
-sheet = connecter_sheets()
+st.title("🔧 Trokia : Mode Diagnostic & Réparation")
 
-tab1, tab2 = st.tabs(["🔎 Recherche Manuelle", "📸 Scan Automatique"])
+# Vérification immédiate des modèles
+st.info("🔄 Connexion à Google pour vérifier votre compte...")
+modeles_dispos, erreur_liste = lister_modeles_dispos()
+
+if erreur_liste:
+    st.error(f"❌ Impossible de lister les modèles : {erreur_liste}")
+    choix_modele = None
+else:
+    st.success(f"✅ {len(modeles_dispos)} modèles trouvés et actifs !")
+    # On laisse l'utilisateur choisir le modèle (fini de deviner !)
+    choix_modele = st.selectbox("Quel cerveau utiliser ?", modeles_dispos, index=0)
+
+st.divider()
+
+sheet = connecter_sheets()
+tab1, tab2 = st.tabs(["Scan Texte", "Scan Photo"])
 
 with tab1:
-    q = st.text_input("Nom de l'objet")
-    if st.button("Estimer 📊"):
-        with st.spinner("Analyse du marché..."):
-            p, i = analyser_prix_ebay(q)
-            st.session_state.res = {'p': p, 'i': i, 'n': q}
+    q = st.text_input("Objet")
+    if st.button("Go 🚀"):
+        p, i = analyser_prix_ebay(q)
+        st.session_state.res = {'p': p, 'i': i, 'n': q}
 
 with tab2:
-    mode = st.radio("Source", ["Caméra", "Galerie"], horizontal=True)
+    mode = st.radio("Mode", ["Caméra", "Galerie"], horizontal=True)
     f = st.camera_input("Photo") if mode == "Caméra" else st.file_uploader("Image")
     
-    if f and st.button("Lancer l'IA ✨"):
-        img_pil = Image.open(f)
-        st.image(img_pil, width=200)
-        with st.spinner("🔍 Identification de l'objet..."):
-            nom_objet, erreur = analyser_image(img_pil)
-            
-            if nom_objet:
-                st.success(f"Identifié : {nom_objet}")
-                with st.spinner(f"Recherche du prix pour : {nom_objet}"):
-                    p, i = analyser_prix_ebay(nom_objet)
-                    st.session_state.res = {'p': p, 'i': i, 'n': nom_objet}
-            else:
-                st.error(f"Erreur IA : {erreur}")
+    if f and st.button("Analyser IA ✨"):
+        if not choix_modele:
+            st.error("Aucun modèle disponible.")
+        else:
+            img = Image.open(f)
+            st.image(img, width=150)
+            with st.spinner(f"Analyse avec {choix_modele}..."):
+                desc, err = analyser_image_avec_modele(img, choix_modele)
+                if desc:
+                    st.success(f"Trouvé : {desc}")
+                    p, i = analyser_prix_ebay(desc)
+                    st.session_state.res = {'p': p, 'i': i, 'n': desc}
+                else:
+                    st.error(f"Erreur IA : {err}")
 
-# SECTION RÉSULTAT
 if 'res' in st.session_state:
     r = st.session_state.res
     st.divider()
-    
-    col1, col2 = st.columns([1, 2])
-    with col1:
-        # On affiche l'image trouvée sur eBay (souvent plus propre)
-        if r['i']: st.image(r['i'], caption="Référence eBay")
-    
-    with col2:
-        st.markdown(f"### 🏷️ {r['n']}")
-        st.metric(label="Cote Moyenne (Ventes Réussies)", value=f"{r['p']:.2f} €")
-        
-        achat = st.number_input("Prix d'achat proposé (€)", min_value=0.0, step=1.0)
-        profit = r['p'] - achat
-        
-        if profit > 0:
-            st.success(f"Marge Potentielle : +{profit:.2f} €")
-        else:
-            st.error(f"Perte Potentielle : {profit:.2f} €")
-            
-        if st.button("💾 Sauvegarder dans Trokia_DB"):
+    c1, c2 = st.columns([1,2])
+    c1.image(r['i'])
+    with c2:
+        st.metric("Prix eBay", f"{r['p']:.2f} €")
+        if st.button("Sauvegarder"):
             if sheet:
-                sheet.append_row([datetime.now().strftime("%Y-%m-%d %H:%M"), r['n'], r['p'], achat, "App V3", r['i']])
-                st.balloons()
-                st.success("Enregistré !")
-            else:
-                st.error("Erreur de connexion Google Sheets")
+                sheet.append_row([datetime.now().str(), r['n'], r['p'], 0, "Diag", r['i']])
+                st.success("Sauvegardé !")
