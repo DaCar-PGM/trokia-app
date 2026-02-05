@@ -1,9 +1,8 @@
 streamlit
-selenium
 pandas
-openpyxl
-webdriver-manager
 gspread
 oauth2client
+selenium
+webdriver-manager
 google-generativeai>=0.7.2
-
+Pillow
