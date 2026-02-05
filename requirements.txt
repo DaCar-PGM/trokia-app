@@ -4,5 +4,6 @@ gspread
 oauth2client
 selenium
 webdriver-manager
-google-generativeai>=0.7.2
+# On force une version très récente pour éviter l'erreur 404
+google-generativeai>=0.8.3
 Pillow
