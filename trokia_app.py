@@ -21,7 +21,7 @@ st.set_page_config(page_title="Trokia Ultimate", page_icon="💎", layout="wide"
 try:
     api_key = st.secrets["GEMINI_API_KEY"]
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    model = genai.GenerativeModel('gemini-1.5-pro')
 except Exception as e:
     st.warning("⚠️ L'IA n'est pas encore active. Vérifiez la clé API dans les Secrets.")
 
@@ -174,3 +174,4 @@ if 'prix' in st.session_state and st.session_state.prix > 0:
                 st.rerun()
             except Exception as e:
                 st.error(f"Erreur de sauvegarde : {e}")
+
