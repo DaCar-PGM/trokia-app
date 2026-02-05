@@ -12,7 +12,7 @@ import requests
 from bs4 import BeautifulSoup
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="Trokia v13 : Visual Selector", page_icon="👁️", layout="wide")
+st.set_page_config(page_title="Trokia v13.1 : Visual Fix", page_icon="👁️", layout="wide")
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -49,20 +49,26 @@ def analyser_image_multi(image_pil, modele):
         return propositions, cat, None
     except Exception as e: return [], "AUTRE", str(e)
 
-# --- 2. RECUPERATION VISUELLE ---
+# --- 2. RECUPERATION VISUELLE (CORRIGÉE) ---
 def get_thumbnail(query):
-    """Récupère UNE image miniature pour illustrer une proposition"""
+    """Récupère l'image réelle en contournant le lazy-loading d'eBay"""
     try:
         clean = re.sub(r'[^\w\s]', '', query).strip()
         url = f"https://www.ebay.fr/sch/i.html?_nkw={clean.replace(' ', '+')}"
-        r = requests.get(url, headers=HEADERS, timeout=3)
+        r = requests.get(url, headers=HEADERS, timeout=4)
         soup = BeautifulSoup(r.text, 'html.parser')
-        img = soup.select_one('.s-item__image-wrapper img')
-        if img:
-            src = img.get('src')
-            if "http" in src: return src
+        
+        # On cherche l'item image
+        img_tag = soup.select_one('.s-item__image-wrapper img')
+        
+        if img_tag:
+            # ASTUCE : eBay cache souvent la vraie image dans 'data-src' ou 'data-img-src'
+            if img_tag.get('data-src'): return img_tag.get('data-src')
+            if img_tag.get('src'): return img_tag.get('src')
+            
     except: pass
-    return "https://via.placeholder.com/150?text=Pas+d'image"
+    # Image par défaut si rien trouvé (Un carré gris propre)
+    return "https://via.placeholder.com/300x300.png?text=Image+Non+Dispo"
 
 def generer_lien(nom, site): return f"https://www.google.com/search?q=site:{site}+{nom.replace(' ', '+')}"
 
@@ -81,8 +87,14 @@ def scan_ebay(recherche):
         r = requests.get(url, headers=HEADERS, timeout=6)
         prices = [float(p.replace(",", ".").replace(" ", "")) for p in re.findall(r"(?:EUR|€)\s*([\d\s\.,]+)|([\d\s\.,]+)\s*(?:EUR|€)", r.text) for x in p if x and 2 < float(x.replace(",", ".").replace(" ", "")) < 5000]
         soup = BeautifulSoup(r.text, 'html.parser')
-        img = soup.select_one('.s-item__image-wrapper img')['src'] if soup.select_one('.s-item__image-wrapper img') else ""
-        return (sum(prices)/len(prices) if prices else 0), len(prices), img, url
+        
+        # Correction aussi ici pour l'image finale
+        img_url = ""
+        img_tag = soup.select_one('.s-item__image-wrapper img')
+        if img_tag:
+            img_url = img_tag.get('data-src') if img_tag.get('data-src') else img_tag.get('src')
+            
+        return (sum(prices)/len(prices) if prices else 0), len(prices), img_url, url
     except: return 0, 0, "", ""
 
 # --- SHEETS ---
@@ -107,14 +119,14 @@ def get_historique(sheet):
     return pd.DataFrame()
 
 # --- UI ---
-st.title("💼 Trokia v13 : Visual Selector")
+st.title("💼 Trokia v13.1 : Visual Selector")
 
 if 'modele_ia' not in st.session_state: st.session_state.modele_ia = configurer_modele()
 sheet = connecter_sheets()
 
-# STATE MANAGEMENT
+# STATE
 if 'props' not in st.session_state: st.session_state.props = []
-if 'props_imgs' not in st.session_state: st.session_state.props_imgs = [] # Pour stocker les images des choix
+if 'props_imgs' not in st.session_state: st.session_state.props_imgs = []
 if 'cat' not in st.session_state: st.session_state.cat = ""
 if 'current_img' not in st.session_state: st.session_state.current_img = None
 
@@ -139,31 +151,26 @@ if f:
                 st.session_state.props = p
                 st.session_state.cat = c
                 
-                # NOUVEAU : On récupère les images pour chaque proposition
-                with st.spinner("📸 Récupération des visuels comparatifs..."):
+                with st.spinner("📸 Récupération des images (Mode Lazy-Load)..."):
                     imgs = []
                     for prop in p:
                         imgs.append(get_thumbnail(prop))
                     st.session_state.props_imgs = imgs
                 st.rerun()
 
-    # SECTION 1 : COMPARAISON VISUELLE
+    # SECTION 1 : VISUAL SELECTION
     st.write("### 1️⃣ Quel modèle correspond le mieux ?")
     
     if st.session_state.props:
-        # On affiche les 4 choix en colonnes avec images
         cols = st.columns(len(st.session_state.props))
-        
-        # On crée un sélecteur propre
-        choix_dict = {} # Pour lier le nom à l'index
         
         for i, col in enumerate(cols):
             with col:
-                # Affichage de l'image de référence
-                st.image(st.session_state.props_imgs[i], use_container_width=True)
+                # Affichage image corrigé
+                if i < len(st.session_state.props_imgs):
+                    st.image(st.session_state.props_imgs[i], use_container_width=True)
                 st.caption(f"**{st.session_state.props[i]}**")
         
-        # Sélecteur
         option_choisie = st.radio(
             "Sélectionnez le modèle identique :", 
             st.session_state.props + ["Autre (Je saisis le nom)"],
@@ -202,17 +209,16 @@ if f:
             pa = col_c2.number_input("Achat (€)", 0.0, step=1.0)
             marge = pv - pa - (pv * 0.15)
             
-            col_c3.metric("Marge Nette (approx)", f"{marge:.2f} €", delta="Profit" if marge > 0 else "Perte")
+            col_c3.metric("Marge Nette", f"{marge:.2f} €", delta="Profit" if marge > 0 else "Perte")
 
             if st.button("💾 Sauvegarder", use_container_width=True):
                 if sheet:
                     sheet.append_row([datetime.now().strftime("%d/%m %H:%M"), nom_final, pv, pa, f"{marge:.2f}", ei])
-                    st.success("Stock mis à jour !")
+                    st.success("Enregistré !")
                     time.sleep(1)
                     st.rerun()
 
     else:
-        # Pas encore d'analyse
         st.info("Prenez une photo pour démarrer.")
 
 # HISTORIQUE
