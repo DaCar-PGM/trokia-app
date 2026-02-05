@@ -12,7 +12,7 @@ from serpapi import GoogleSearch
 import statistics
 
 # --- CONFIGURATION ULTIME ---
-st.set_page_config(page_title="Trokia v17.1 : World Scan (Stable)", page_icon="🌍", layout="wide")
+st.set_page_config(page_title="Trokia v17.2 : Fast AI", page_icon="⚡", layout="wide")
 
 # --- 1. FONCTIONS IA & UTILITAIRES ---
 def configurer_modele():
@@ -27,6 +27,7 @@ def configurer_modele():
 def analyser_image_multi(image_pil, modele):
     try:
         model = genai.GenerativeModel(modele)
+        # Prompt optimisé pour avoir juste le texte brut
         prompt = "Analyse l'image. Donne la CATÉGORIE et 4 modèles précis. Format:\nCAT: ...\n1. ...\n2. ...\n3. ...\n4. ..."
         response = model.generate_content([prompt, image_pil])
         text = response.text.strip()
@@ -72,14 +73,13 @@ def scan_google_shopping_world(query):
             if not main_image and item.get("thumbnail"):
                 main_image = item.get("thumbnail")
 
-            # On sécurise le lien pour qu'il ne soit jamais None
             link_final = item.get("link")
             if not link_final: link_final = item.get("product_link", "")
 
             clean_results.append({
                 "source": item.get("source", "Marché Web"),
                 "prix": p_float,
-                "lien": link_final, # Peut être "" mais pas None
+                "lien": link_final,
                 "titre": item.get("title", "Sans titre")
             })
             
@@ -92,7 +92,6 @@ def scan_google_shopping_world(query):
         return stats, clean_results, main_image
 
     except Exception as e:
-        # En cas de crash API total, on ne plante pas l'app
         print(f"Erreur SerpApi: {e}")
         return {"min":0, "med":0, "max":0, "count":0}, [], ""
 
@@ -117,7 +116,7 @@ def get_historique(sheet):
     return pd.DataFrame()
 
 # --- UI ---
-st.title("🌍 Trokia v17.1 : World Scan (Stable)")
+st.title("🌍 Trokia v17.2 : Fast AI")
 if 'modele_ia' not in st.session_state: st.session_state.modele_ia = configurer_modele()
 sheet = connecter_sheets()
 
@@ -136,19 +135,43 @@ if c_btn.button("🔄 Reset"): reset_all(); st.rerun()
 # Onglets
 tab_photo, tab_manuel = st.tabs(["📸 IA VISUELLE", "⌨️ MANUEL / EAN"])
 
+# --- CHANGEMENT ICI : LOGIQUE DU SCAN IA ---
 with tab_photo:
     mode = st.radio("Source", ["Caméra", "Galerie"], horizontal=True, label_visibility="collapsed")
     f = st.camera_input("Photo") if mode == "Caméra" else st.file_uploader("Image")
+    
+    # 1. Analyse IA
     if f and st.session_state.current_img != f.name:
         st.session_state.current_img = f.name
+        # On reset les résultats précédents pour ne pas embrouiller
+        st.session_state.go_search = False 
+        st.session_state.scan_results = None
+        
         with st.spinner("🤖 Identification IA..."):
             p, e = analyser_image_multi(Image.open(f), st.session_state.modele_ia)
-            if p: st.session_state.props = p; st.rerun()
+            if p: 
+                st.session_state.props = p
+                st.rerun()
+    
+    # 2. Affichage des choix (BOUTONS DIRECTS)
     if st.session_state.props:
-        st.write("##### Choisir le modèle :")
-        choix = st.radio("Options IA :", st.session_state.props + ["Autre"], horizontal=False)
-        if st.button("Valider & Scanner", type="primary"):
-            if choix != "Autre": st.session_state.nom_final = choix; st.session_state.go_search = True; st.rerun()
+        st.write("##### 👇 Cliquez sur le bon modèle pour scanner :")
+        
+        # On affiche les boutons sur 2 colonnes pour faire plus propre
+        col_choix1, col_choix2 = st.columns(2)
+        
+        for i, prop in enumerate(st.session_state.props):
+            # On alterne les colonnes
+            target_col = col_choix1 if i % 2 == 0 else col_choix2
+            
+            # LE BOUTON MAGIQUE : Un clic = Validation + Scan
+            if target_col.button(f"🔍 {prop}", use_container_width=True):
+                st.session_state.nom_final = prop
+                st.session_state.go_search = True
+                st.rerun()
+                
+        if st.button("Autre (Saisie Manuelle)"):
+            st.warning("Passez sur l'onglet 'Manuel' pour taper le nom.")
 
 with tab_manuel:
     with st.form("man"):
@@ -161,52 +184,55 @@ if st.session_state.go_search and st.session_state.nom_final:
     st.divider()
     st.markdown(f"### 🎯 Analyse Globale : **{st.session_state.nom_final}**")
     
-    with st.spinner("🌍 Interrogation des marchés européens..."):
-        stats, details, img_ref = scan_google_shopping_world(st.session_state.nom_final)
-        st.session_state.scan_results = (stats, details, img_ref)
+    # On ne relance le scan que si on n'a pas déjà les résultats (pour éviter de griller les crédits API)
+    if not st.session_state.scan_results:
+        with st.spinner("🌍 Interrogation des marchés européens..."):
+            stats, details, img_ref = scan_google_shopping_world(st.session_state.nom_final)
+            st.session_state.scan_results = (stats, details, img_ref)
+    
+    # Récupération depuis le cache de session
+    if st.session_state.scan_results:
+        stats, details, img_ref = st.session_state.scan_results
 
-    if stats["count"] > 0:
-        c_img, c_stats = st.columns([1, 3])
-        if img_ref: c_img.image(img_ref, width=150, caption="Réf. Google")
-        
-        with c_stats:
-            k1, k2, k3 = st.columns(3)
-            k1.metric("Prix Bas", f"{stats['min']:.0f} €")
-            k2.metric("Prix Médian", f"{stats['med']:.0f} €", f"{stats['count']} offres")
-            k3.metric("Prix Haut", f"{stats['max']:.0f} €")
-        
-        st.write("---")
-        st.write("##### 🔎 Détail des offres :")
-        
-        # CORRECTION DU BUG D'AFFICHAGE ICI
-        cols_offres = st.columns(5)
-        for i, item in enumerate(details[:10]): # On affiche max 10 offres
-            with cols_offres[i % 5]: # Modulo pour revenir à la ligne proprement
-                st.metric(item["source"], f"{item['prix']:.0f} €")
-                st.caption(item["titre"][:25]+"...")
-                
-                # SÉCURITÉ BOUTON : Si pas de lien, bouton désactivé
-                if item["lien"] and item["lien"].startswith("http"):
-                    st.link_button("Voir", item["lien"])
-                else:
-                    st.button("Pas de lien", disabled=True, key=f"no_link_{i}")
-                
-                st.divider()
+        if stats["count"] > 0:
+            c_img, c_stats = st.columns([1, 3])
+            if img_ref: c_img.image(img_ref, width=150, caption="Réf. Google")
+            
+            with c_stats:
+                k1, k2, k3 = st.columns(3)
+                k1.metric("Prix Bas", f"{stats['min']:.0f} €")
+                k2.metric("Prix Médian", f"{stats['med']:.0f} €", f"{stats['count']} offres")
+                k3.metric("Prix Haut", f"{stats['max']:.0f} €")
+            
+            st.write("---")
+            st.write("##### 🔎 Détail des offres :")
+            
+            cols_offres = st.columns(5)
+            for i, item in enumerate(details[:10]): 
+                with cols_offres[i % 5]: 
+                    st.metric(item["source"], f"{item['prix']:.0f} €")
+                    st.caption(item["titre"][:25]+"...")
+                    
+                    if item["lien"] and item["lien"].startswith("http"):
+                        st.link_button("Voir", item["lien"])
+                    else:
+                        st.button("Pas de lien", disabled=True, key=f"no_link_{i}")
+                    st.divider()
 
-        st.write("---")
-        st.markdown("#### 💰 Calculateur de Marge")
-        cc1, cc2, cc3 = st.columns(3)
-        pv = cc1.number_input("Vente (€)", value=float(stats['med']), step=1.0)
-        pa = cc2.number_input("Achat (€)", 0.0, step=1.0)
-        marge = pv - pa - (pv * 0.15)
-        cc3.metric("Profit Net", f"{marge:.2f} €", delta="Gagnant" if marge > 0 else "Perdant")
+            st.write("---")
+            st.markdown("#### 💰 Calculateur de Marge")
+            cc1, cc2, cc3 = st.columns(3)
+            pv = cc1.number_input("Vente (€)", value=float(stats['med']), step=1.0)
+            pa = cc2.number_input("Achat (€)", 0.0, step=1.0)
+            marge = pv - pa - (pv * 0.15)
+            cc3.metric("Profit Net", f"{marge:.2f} €", delta="Gagnant" if marge > 0 else "Perdant")
 
-        if st.button("💾 Sauvegarder", use_container_width=True):
-            if sheet:
-                sheet.append_row([datetime.now().strftime("%d/%m %H:%M"), st.session_state.nom_final, pv, pa, f"{marge:.2f}", img_ref])
-                st.balloons(); st.success("Sauvegardé !"); time.sleep(1); reset_all(); st.rerun()
-    else:
-        st.warning("Aucun résultat trouvé sur Google Shopping. Essayez un autre terme.")
+            if st.button("💾 Sauvegarder", use_container_width=True):
+                if sheet:
+                    sheet.append_row([datetime.now().strftime("%d/%m %H:%M"), st.session_state.nom_final, pv, pa, f"{marge:.2f}", img_ref])
+                    st.balloons(); st.success("Sauvegardé !"); time.sleep(1); reset_all(); st.rerun()
+        else:
+            st.warning("Aucun résultat trouvé sur Google Shopping.")
 
 if sheet:
     df = get_historique(sheet)
