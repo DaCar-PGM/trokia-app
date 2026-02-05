@@ -12,50 +12,86 @@ from serpapi import GoogleSearch
 import statistics
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="Trokia v17.5 : Safe Mode", page_icon="🛡️", layout="wide")
+st.set_page_config(page_title="Trokia v17.7 : Ultimate List", page_icon="📝", layout="wide")
 
-# --- 1. FONCTIONS IA (Avec Anti-Erreur 429) ---
-def configurer_modele():
+# --- 1. STRATÉGIE "CASCADE TOTALE" POUR L'IA ---
+
+def get_working_model(api_key):
+    """
+    Renvoie la LISTE COMPLÈTE de tous les modèles possibles.
+    L'appli va les tester un par un jusqu'à ce que ça marche.
+    """
+    genai.configure(api_key=api_key)
+    
+    # LA fameuse "Longue Liste" de ce matin
+    # Classée par ordre de préférence :
+    CANDIDATS = [
+        # 1. Les plus récents et rapides (Flash 1.5)
+        "gemini-1.5-flash",
+        "gemini-1.5-flash-latest",
+        "gemini-1.5-flash-001",
+        "gemini-1.5-flash-002",
+        "gemini-1.5-flash-8b", # Version ultra légère
+
+        # 2. Les plus intelligents (Pro 1.5) - Si Flash échoue
+        "gemini-1.5-pro",
+        "gemini-1.5-pro-latest",
+        "gemini-1.5-pro-001",
+        "gemini-1.5-pro-002",
+
+        # 3. Les classiques (Pro 1.0) - Très stables
+        "gemini-1.0-pro",
+        "gemini-1.0-pro-latest",
+        "gemini-1.0-pro-001",
+        "gemini-pro", # L'alias standard
+        "gemini-pro-vision", # Spécialisé image (vieux mais efficace)
+        
+        # 4. Les expérimentaux (Dernier recours)
+        "gemini-2.0-flash-exp", # Si tu as accès à la beta
+        "gemini-exp-1206"
+    ]
+    
+    return CANDIDATS
+
+def analyser_image_multi_cascade(image_pil):
     try:
         api_key = st.secrets["GEMINI_API_KEY"]
         genai.configure(api_key=api_key)
-        # CORRECTION : On force le modèle 1.5 Flash qui a de meilleurs quotas
-        # Au lieu de prendre le premier venu qui peut être le 2.5 limité
-        return "gemini-1.5-flash"
-    except: return "gemini-1.5-flash"
+        
+        candidats = get_working_model(api_key)
+        last_error = ""
+        
+        # BOUCLE DE SURVIE
+        for nom_modele in candidats:
+            try:
+                # On tente...
+                model = genai.GenerativeModel(nom_modele)
+                prompt = "Analyse cette image. Donne la CATÉGORIE et 4 modèles précis. Format:\n1. [Marque Modèle]\n2. [Marque Modèle]..."
+                response = model.generate_content([prompt, image_pil])
+                text = response.text.strip()
+                
+                # Nettoyage
+                propositions = []
+                lines = text.split('\n')
+                for l in lines:
+                    l = l.strip()
+                    if l and (l[0].isdigit() or l.startswith("-") or l.startswith("*")):
+                        clean_l = re.sub(r"^[\d\.\-\)\*]+\s*", "", l)
+                        propositions.append(clean_l)
+                
+                if propositions:
+                    # BINGO ! On arrête de chercher
+                    st.toast(f"✅ Connecté sur : {nom_modele}")
+                    return propositions, None
+                    
+            except Exception as e:
+                # Echec, on passe au suivant
+                last_error = str(e)
+                continue 
 
-def analyser_image_multi(image_pil, modele_nom):
-    # SYSTÈME DE RETRY (3 tentatives)
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            model = genai.GenerativeModel(modele_nom)
-            prompt = "Analyse l'image. Donne la CATÉGORIE et 4 modèles précis. Format:\n1. [Marque Modèle]\n2. [Marque Modèle]..."
-            
-            # On lance l'appel
-            response = model.generate_content([prompt, image_pil])
-            text = response.text.strip()
-            
-            propositions = []
-            lines = text.split('\n')
-            for l in lines:
-                l = l.strip()
-                if l and (l[0].isdigit() or l.startswith("-") or l.startswith("*")):
-                    clean_l = re.sub(r"^[\d\.\-\)\*]+\s*", "", l)
-                    propositions.append(clean_l)
-            return propositions, None
-            
-        except Exception as e:
-            error_str = str(e)
-            # Si c'est l'erreur 429 (Quota), on attend un peu et on recommence
-            if "429" in error_str or "quota" in error_str.lower():
-                time.sleep(2) # On fait une pause de 2 secondes
-                continue # On réessaie
-            else:
-                # Si c'est une autre erreur, on arrête
-                return [], error_str
-    
-    return [], "Serveur IA saturé (Trop de demandes rapides). Attendez 1 min."
+        return [], f"Aucun des {len(candidats)} modèles n'a répondu. Dernière erreur : {last_error}"
+
+    except Exception as e: return [], str(e)
 
 # --- 2. FONCTIONS DE RECHERCHE ---
 
@@ -66,16 +102,14 @@ def identifier_ean_via_google(ean):
             "engine": "google",
             "q": ean,
             "google_domain": "google.fr",
-            "gl": "fr",
-            "hl": "fr"
+            "gl": "fr", "hl": "fr"
         }
         search = GoogleSearch(params)
         results = search.get_dict()
         organic = results.get("organic_results", [])
         if organic:
             titre_brut = organic[0].get("title", "")
-            titre_propre = titre_brut.split(" - ")[0].split(" | ")[0]
-            return titre_propre
+            return titre_brut.split(" - ")[0].split(" | ")[0]
     except: pass
     return None
 
@@ -96,20 +130,15 @@ def scan_google_shopping_world(query):
             "engine": "google_shopping",
             "q": scan_query,
             "google_domain": "google.fr",
-            "gl": "fr",
-            "hl": "fr",
-            "num": "20"
+            "gl": "fr", "hl": "fr", "num": "20"
         }
         
         search = GoogleSearch(params)
         results = search.get_dict()
         
-        # Gestion erreur SerpApi (ex: clé invalide ou quota épuisé)
-        if "error" in results:
-             return {"count":0, "error": results["error"]}, [], "", query
+        if "error" in results: return {"count":0, "error": results["error"]}, [], "", query
 
         shopping_results = results.get("shopping_results", [])
-        
         prices = []
         clean_results = []
         main_image = ""
@@ -118,10 +147,8 @@ def scan_google_shopping_world(query):
             prix_txt = str(item.get("price", "0")).replace("\xa0€", "").replace("€", "").replace(",", ".").strip()
             try:
                 found = re.findall(r"(\d+[\.,]?\d*)", prix_txt)
-                if found:
-                    p_float = float(found[0])
-                    if p_float > 1: prices.append(p_float)
-                else: p_float = 0
+                p_float = float(found[0]) if found else 0
+                if p_float > 1: prices.append(p_float)
             except: p_float = 0
             
             if not main_image and item.get("thumbnail"): main_image = item.get("thumbnail")
@@ -144,8 +171,7 @@ def scan_google_shopping_world(query):
         }
         return stats, clean_results, main_image, scan_query
 
-    except Exception as e:
-        return {"count":0}, [], "", query
+    except Exception as e: return {"count":0}, [], "", query
 
 # --- SHEETS ---
 def connecter_sheets():
@@ -166,21 +192,19 @@ def get_historique(sheet):
     return pd.DataFrame()
 
 # --- UI ---
-st.title("🛡️ Trokia v17.5 : Safe Mode")
-if 'modele_ia' not in st.session_state: st.session_state.modele_ia = configurer_modele()
+st.title("📝 Trokia v17.7 : Ultimate List")
 sheet = connecter_sheets()
 
 def reset_all():
     st.session_state.nom_final = ""; st.session_state.go_search = False
     st.session_state.props = []; st.session_state.current_img = None
-    st.session_state.scan_results = None
-    st.session_state.nom_reel_produit = ""
+    st.session_state.scan_results = None; st.session_state.nom_reel_produit = ""
 
 if 'nom_final' not in st.session_state: reset_all()
 
 # Header
 c_logo, c_btn = st.columns([4,1])
-c_logo.caption("Scan Mondial + Anti-Crash")
+c_logo.caption("Scan Mondial + Liste Complète IA")
 if c_btn.button("🔄 Reset Total"): reset_all(); st.rerun()
 
 # Onglets
@@ -190,23 +214,14 @@ with tab_photo:
     mode = st.radio("Source", ["Caméra", "Galerie"], horizontal=True, label_visibility="collapsed")
     f = st.camera_input("Photo") if mode == "Caméra" else st.file_uploader("Image")
     
-    if f:
-        # Bouton Secours
-        if st.button("⚡ Forcer (si bloqué)", type="secondary"):
-            st.session_state.current_img = None; st.rerun()
-
     if f and st.session_state.current_img != f.name:
         st.session_state.current_img = f.name
-        st.session_state.go_search = False 
-        st.session_state.scan_results = None
+        st.session_state.go_search = False; st.session_state.scan_results = None
         
-        with st.spinner("🤖 Identification IA (Tentative auto)..."):
-            # On appelle la fonction blindée
-            p, err = analyser_image_multi(Image.open(f), st.session_state.modele_ia)
-            if p: 
-                st.session_state.props = p; st.rerun()
-            else:
-                st.error(f"⚠️ Erreur IA : {err}")
+        with st.spinner("🤖 Test des cerveaux IA en cascade..."):
+            p, err = analyser_image_multi_cascade(Image.open(f))
+            if p: st.session_state.props = p; st.rerun()
+            else: st.error(f"⚠️ Échec total : {err}")
 
     if st.session_state.props:
         st.write("##### 👇 Cliquez sur le bon modèle :")
@@ -214,9 +229,7 @@ with tab_photo:
         for i, prop in enumerate(st.session_state.props):
             col = c1 if i % 2 == 0 else c2
             if col.button(f"🔍 {prop}", use_container_width=True):
-                st.session_state.nom_final = prop
-                st.session_state.go_search = True
-                st.rerun()
+                st.session_state.nom_final = prop; st.session_state.go_search = True; st.rerun()
         if st.button("Autre (Saisie Manuelle)"): st.warning("Utilisez l'onglet Manuel.")
 
 with tab_manuel:
@@ -238,14 +251,9 @@ if st.session_state.go_search and st.session_state.nom_final:
     if st.session_state.scan_results:
         stats, details, img_ref = st.session_state.scan_results
         
-        # Gestion cas erreur API SERPAPI
-        if "error" in stats:
-             st.error(f"Erreur Scan Mondial : {stats['error']}")
-             st.info("Vérifiez votre clé SerpApi ou votre quota.")
-        
+        if "error" in stats: st.error(f"Erreur Scan : {stats['error']}")
         elif stats["count"] > 0:
             st.markdown(f"### 🎯 Résultat : **{st.session_state.nom_reel_produit}**")
-            
             c_img, c_stats = st.columns([1, 3])
             if img_ref: c_img.image(img_ref, width=150)
             with c_stats:
@@ -274,8 +282,7 @@ if st.session_state.go_search and st.session_state.nom_final:
                 if sheet:
                     sheet.append_row([datetime.now().strftime("%d/%m"), st.session_state.nom_reel_produit, pv, pa, f"{marge:.2f}", img_ref])
                     st.balloons(); st.success("OK"); time.sleep(1); reset_all(); st.rerun()
-        else:
-            st.warning("Aucun résultat. Vérifiez la clé SerpApi.")
+        else: st.warning("Aucun résultat. Vérifiez la clé SerpApi.")
 
 if sheet:
     df = get_historique(sheet)
