@@ -10,10 +10,9 @@ import time
 import re
 import requests
 from bs4 import BeautifulSoup
-import random
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="Trokia v8.5 : Bing Engine", page_icon="🕵️", layout="wide")
+st.set_page_config(page_title="Trokia v12 : Business Pro", page_icon="💼", layout="wide")
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -31,88 +30,60 @@ def configurer_modele():
         return choix if choix else all_m[0]
     except: return None
 
-def analyser_image_complete(image_pil, modele):
+def analyser_image_multi(image_pil, modele):
     try:
         model = genai.GenerativeModel(modele)
-        prompt = "Expert revendeur. Analyse l'image. NOM EXACT (Marque Modèle). Ex: 'Nitro Staxx Boots'. Format: NOM: ... | CAT: VETEMENT/MEUBLE/TECH/AUTRE"
+        prompt = (
+            "Analyse cette image. Donne-moi la CATÉGORIE (VETEMENT, MEUBLE, TECH, AUTRE)."
+            "Liste 4 propositions de modèles précis."
+            "Format:\nCAT: ...\n1. ...\n2. ...\n3. ...\n4. ..."
+        )
         response = model.generate_content([prompt, image_pil])
         text = response.text.strip()
-        nom, cat = "Inconnu", "AUTRE"
-        if "NOM:" in text: nom = text.split("NOM:")[1].split("|")[0].strip()
-        if "CAT:" in text: cat = text.split("CAT:")[1].strip()
-        return nom, cat, None
-    except Exception as e: return None, None, str(e)
+        cat = "AUTRE"
+        propositions = []
+        lines = text.split('\n')
+        for l in lines:
+            if l.startswith("CAT:"): cat = l.replace("CAT:", "").strip()
+            elif l[0].isdigit() and "." in l: propositions.append(l.split(".", 1)[1].strip())
+        return propositions, cat, None
+    except Exception as e: return [], "AUTRE", str(e)
 
-# --- 2. MOTEUR BING (Tentative Microsoft) ---
-def generer_lien_recherche(nom, site):
-    return f"https://www.google.com/search?q=site:{site}+{nom.replace(' ', '+')}"
-
-def scan_via_bing(nom, site):
-    """
-    Utilise Bing pour contourner Google/DDG.
-    """
+# --- 2. OUTILS ---
+def recuperer_images_exemples(query):
     try:
-        # Recherche Bing : site:leboncoin.fr "Nitro Staxx"
-        query = f"site:{site} {nom}"
-        url = f"https://www.bing.com/search?q={query.replace(' ', '+')}"
-        
-        # Bing est sensible aux cookies, on essaie sans, juste avec le User-Agent
-        r = requests.get(url, headers=HEADERS, timeout=6)
-        
-        prices = []
-        # Bing affiche souvent les prix dans les descriptions ("snippet")
-        # On cherche les motifs de prix
-        raw = re.findall(r"(\d+[\.,]?\d*)\s?(?:€|EUR)", r.text)
-        
-        for p in raw:
-            try:
-                val = float(p.replace(",", ".").replace(" ", ""))
-                # Filtre large
-                if 2 < val < 5000: prices.append(val)
-            except: continue
-            
-        moy = sum(prices)/len(prices) if prices else 0
-        
-        # On renvoie le lien Google pour l'utilisateur (plus familier) même si on a scanné avec Bing
-        return moy, len(prices), generer_lien_recherche(nom, site)
-        
-    except Exception as e:
-        return 0, 0, generer_lien_recherche(nom, site)
+        clean = re.sub(r'[^\w\s]', '', query).strip()
+        url = f"https://www.ebay.fr/sch/i.html?_nkw={clean.replace(' ', '+')}"
+        r = requests.get(url, headers=HEADERS, timeout=4)
+        soup = BeautifulSoup(r.text, 'html.parser')
+        images = []
+        imgs = soup.select('.s-item__image-wrapper img')
+        for img in imgs:
+            src = img.get('src')
+            if src and "http" in src: images.append(src)
+            if len(images) >= 3: break
+        return images
+    except: return []
 
-# ROBOT EBAY (Direct)
-def scan_ebay_direct(recherche):
+def generer_lien(nom, site): return f"https://www.google.com/search?q=site:{site}+{nom.replace(' ', '+')}"
+
+def scan_bing(nom, site):
+    try:
+        url = f"https://www.bing.com/search?q=site:{site}+{nom.replace(' ', '+')}"
+        r = requests.get(url, headers=HEADERS, timeout=5)
+        prices = [float(p.replace(",", ".").replace(" ", "")) for p in re.findall(r"(\d+[\.,]?\d*)\s?(?:€|EUR)", r.text) if 2 < float(p.replace(",", ".").replace(" ", "")) < 5000]
+        return (sum(prices)/len(prices) if prices else 0), len(prices), generer_lien(nom, site)
+    except: return 0, 0, generer_lien(nom, site)
+
+def scan_ebay(recherche):
     try:
         clean = re.sub(r'[^\w\s]', '', recherche).strip()
         url = f"https://www.ebay.fr/sch/i.html?_nkw={clean.replace(' ', '+')}&LH_Sold=1&LH_Complete=1"
         r = requests.get(url, headers=HEADERS, timeout=6)
-        prices = []
+        prices = [float(p.replace(",", ".").replace(" ", "")) for p in re.findall(r"(?:EUR|€)\s*([\d\s\.,]+)|([\d\s\.,]+)\s*(?:EUR|€)", r.text) for x in p if x and 2 < float(x.replace(",", ".").replace(" ", "")) < 5000]
         soup = BeautifulSoup(r.text, 'html.parser')
-        
-        items = soup.select('.s-item__price')
-        for item in items:
-            txt = item.get_text()
-            vals = re.findall(r"[\d\.,]+", txt)
-            for v in vals:
-                try:
-                    v_clean = float(v.replace(".", "").replace(",", "."))
-                    if 5 < v_clean < 5000: prices.append(v_clean)
-                except: continue
-        
-        if not prices:
-            raw = re.findall(r"(?:EUR|€)\s*([\d\s\.,]+)|([\d\s\.,]+)\s*(?:EUR|€)", r.text)
-            for p in raw:
-                v = p[0] if p[0] else p[1]
-                try:
-                    v_clean = float(v.replace(" ", "").replace("\u202f", "").replace(",", "."))
-                    if 2 < v_clean < 5000: prices.append(v_clean)
-                except: continue
-
-        img = ""
-        try: img = soup.select_one('.s-item__image-wrapper img')['src']
-        except: pass
-        
-        moy = sum(prices)/len(prices) if prices else 0
-        return moy, len(prices), img, url
+        img = soup.select_one('.s-item__image-wrapper img')['src'] if soup.select_one('.s-item__image-wrapper img') else ""
+        return (sum(prices)/len(prices) if prices else 0), len(prices), img, url
     except: return 0, 0, "", ""
 
 # --- SHEETS ---
@@ -121,106 +92,126 @@ def connecter_sheets():
         json_str = st.secrets["service_account_info"]
         creds_dict = json.loads(json_str)
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, ["https://spreadsheets.google.com/feeds"])
-        return gspread.authorize(creds).open("Trokia_DB").sheet1
+        client = gspread.authorize(creds)
+        return client.open("Trokia_DB").sheet1
     except: return None
 
+def get_historique(sheet):
+    """Récupère les 5 dernières lignes pour l'affichage"""
+    try:
+        data = sheet.get_all_values()
+        if len(data) > 1:
+            headers = data[0]
+            rows = data[-5:] # Les 5 derniers
+            rows.reverse() # Du plus récent au plus vieux
+            return pd.DataFrame(rows, columns=headers)
+    except: pass
+    return pd.DataFrame()
+
 # --- UI ---
-st.title("🎛️ Trokia v8.5 : Bing Power")
+st.title("💼 Trokia v12 : Business Pro")
 
 if 'modele_ia' not in st.session_state: st.session_state.modele_ia = configurer_modele()
 sheet = connecter_sheets()
 
+if 'props' not in st.session_state: st.session_state.props = []
+if 'cat' not in st.session_state: st.session_state.cat = ""
+if 'current_img' not in st.session_state: st.session_state.current_img = None
+if 'reset_trigger' not in st.session_state: st.session_state.reset_trigger = False
+
+# BOUTON RESET EN HAUT
+if st.button("🔄 Nouveau Scan (Reset)"):
+    st.session_state.props = []
+    st.session_state.cat = ""
+    st.session_state.current_img = None
+    st.rerun()
+
 mode = st.radio("Source", ["Caméra", "Galerie"], horizontal=True, label_visibility="collapsed")
 f = st.camera_input("Scanner") if mode == "Caméra" else st.file_uploader("Image")
 
-if f and st.button("Lancer l'Analyse 🚀"):
-    img_pil = Image.open(f)
-    c1, c2 = st.columns([1, 3])
-    c1.image(img_pil, width=150)
+# LOGIQUE PRINCIPALE
+if f:
+    if st.session_state.current_img != f.name:
+        st.session_state.current_img = f.name
+        with st.spinner("Analyse IA..."):
+            p, c, e = analyser_image_multi(Image.open(f), st.session_state.modele_ia)
+            if p: st.session_state.props = p; st.session_state.cat = c; st.rerun()
+
+    c1, c2 = st.columns([1, 2])
+    c1.image(f, width=150)
     
     with c2:
-        with st.spinner("🧠 Analyse IA..."):
-            nom, cat, err = analyser_image_complete(img_pil, st.session_state.modele_ia)
+        st.caption(f"Catégorie : {st.session_state.cat}")
+        opts = st.session_state.props + ["Autre"]
+        choix = st.radio("Modèle ?", opts, label_visibility="collapsed")
+        nom_final = st.text_input("Nom exact", value=(choix if choix != "Autre" else ""))
+
+        if nom_final:
+            refs = recuperer_images_exemples(nom_final)
+            if refs:
+                k1, k2, k3 = st.columns(3)
+                try: k1.image(refs[0]) 
+                except: pass
+                try: k2.image(refs[1]) 
+                except: pass
+                try: k3.image(refs[2]) 
+                except: pass
         
-        if nom:
-            st.markdown(f"### 🔎 {nom}")
-            
-            with st.spinner("Scraping Multi-Sources..."):
-                # 1. eBay
-                ebay_p, ebay_n, ebay_img, ebay_url = scan_ebay_direct(nom)
-                
-                # 2. Leboncoin (Via Bing)
-                lbc_p, lbc_n, lbc_url = scan_via_bing(nom, "leboncoin.fr")
-                
-                # 3. Rakuten (Via Bing)
-                rak_p, rak_n, rak_url = scan_via_bing(nom, "fr.shopping.rakuten.com")
-                
-                # 4. Vinted
-                vinted_p, vinted_n, vinted_url = 0, 0, generer_lien_recherche(nom, "vinted.fr")
-                if "VETEMENT" in cat:
-                    vinted_p, vinted_n, _ = scan_via_bing(nom, "vinted.fr")
-                
-            st.divider()
-            k1, k2, k3, k4 = st.columns(4)
-            
-            # --- AFFICHAGE PRO (Même si 0€ trouvé) ---
-            
-            with k1:
-                st.markdown("#### 🔵 eBay")
-                if ebay_p > 0:
-                    st.metric("Cote", f"{ebay_p:.2f} €", f"{ebay_n} ref")
-                    st.link_button("Voir Annonces", ebay_url)
-                else: 
-                    st.info("Aucun historique")
-                    st.link_button("Chercher", ebay_url)
-            
-            with k2:
-                st.markdown("#### 🟠 Leboncoin")
-                if lbc_p > 0:
-                    st.metric("Offre", f"{lbc_p:.0f} €", f"~{lbc_n} annonces")
-                    st.link_button("Voir Annonces", lbc_url)
-                else:
-                    # On ne met plus "Pas de ref", on met un bouton d'action positif
-                    st.info("Marché Local") 
-                    st.link_button("🔎 Voir les offres", lbc_url)
+        go = st.button("✅ Valider & Estimer", type="primary", use_container_width=True)
 
-            with k3:
-                st.markdown("#### 🟣 Rakuten")
-                if rak_p > 0:
-                    st.metric("Pro", f"{rak_p:.0f} €")
-                    st.link_button("Voir Annonces", rak_url)
-                else:
-                    st.info("Prix Pro")
-                    st.link_button("🔎 Voir les offres", rak_url)
+    if go and nom_final:
+        st.divider()
+        with st.spinner("Scraping..."):
+            ep, en, ei, eu = scan_ebay(nom_final)
+            lp, ln, lu = scan_bing(nom_final, "leboncoin.fr")
+            rp, rn, ru = scan_bing(nom_final, "fr.shopping.rakuten.com")
+            vp, vn, vu = 0, 0, generer_lien(nom_final, "vinted.fr")
+            if "VETEMENT" in st.session_state.cat: vp, _, _ = scan_bing(nom_final, "vinted.fr")
 
-            with k4:
-                st.markdown("#### 🔴 Vinted")
-                st.info("Seconde Main")
-                st.link_button("👕 Ouvrir Vinted", vinted_url)
+        # DASHBOARD PRIX
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("eBay (Cote)", f"{ep:.2f} €" if ep else "-", f"{en} vtes"); k1.link_button("Voir", eu)
+        k2.metric("LBC", f"{lp:.0f} €" if lp else "-"); k2.link_button("Voir", lu)
+        k3.metric("Rakuten", f"{rp:.0f} €" if rp else "-"); k3.link_button("Voir", ru)
+        k4.metric("Vinted", f"{vp:.0f} €" if vp else "-"); k4.link_button("Voir", vu)
 
-            # SAVE
-            # On privilégie eBay pour la cote, sinon la moyenne des autres
-            prix_trouves = [p for p in [ebay_p, lbc_p, rak_p] if p > 0]
-            if ebay_p > 0:
-                prix_final = ebay_p
-            elif prix_trouves:
-                prix_final = sum(prix_trouves)/len(prix_trouves)
-            else:
-                prix_final = 0.0
+        # CALCULATEUR DE PROFIT (NOUVEAU !)
+        st.write("---")
+        st.markdown("### 💰 Calculateur de Profit")
+        
+        # On suggère un prix de vente (eBay ou moyenne)
+        sugg = ep if ep > 0 else (lp if lp > 0 else 0.0)
+        
+        col_calc1, col_calc2, col_calc3 = st.columns(3)
+        prix_vente = col_calc1.number_input("Prix Vente Espéré (€)", value=float(sugg), step=1.0)
+        prix_achat = col_calc2.number_input("Prix Achat (€)", 0.0, step=1.0)
+        
+        # Estimation frais (ex: 13% eBay + Port) -> On simplifie à 15% de frais plateforme
+        frais_estimes = prix_vente * 0.15
+        marge_nette = prix_vente - prix_achat - frais_estimes
+        
+        col_calc3.metric(
+            label="Marge Nette Estimée (approx)", 
+            value=f"{marge_nette:.2f} €", 
+            delta="Profit" if marge_nette > 0 else "Perte",
+            delta_color="normal"
+        )
+        st.caption(f"*Inclut une estimation de 15% de frais de plateforme ({frais_estimes:.2f}€).")
 
-            st.session_state.sd = {'n': nom, 'p': prix_final, 'i': ebay_img}
+        if st.button("💾 Sauvegarder dans le Stock", use_container_width=True):
+            if sheet:
+                sheet.append_row([datetime.now().strftime("%d/%m/%Y %H:%M"), nom_final, prix_vente, prix_achat, f"Marge: {marge_nette:.2f}€", ei])
+                st.success("Sauvegardé !")
+                time.sleep(1) # Petit temps pour laisser Sheets écrire
+                st.rerun() # Rafraîchir pour mettre à jour l'historique
 
-if 'sd' in st.session_state:
-    d = st.session_state.sd
-    st.write("---")
-    
-    if d['p'] > 0:
-        st.success(f"💰 Cote Estimée : **{d['p']:.2f} €**")
-    
-    c1, c2, c3 = st.columns([1,1,2])
-    p_final = c1.number_input("Prix Revente", value=float(d['p']))
-    achat = c2.number_input("Prix Achat", 0.0)
-    if c3.button("💾 Sauvegarder", use_container_width=True):
-        if sheet:
-            sheet.append_row([datetime.now().strftime("%d/%m/%Y"), d['n'], p_final, achat, "Trokia v8.5", d['i']])
-            st.success("Enregistré !")
+# --- SECTION HISTORIQUE (NOUVEAU !) ---
+st.write("---")
+st.markdown("### 📋 Derniers Objets Scannés")
+if sheet:
+    df_hist = get_historique(sheet)
+    if not df_hist.empty:
+        # On affiche juste les colonnes utiles
+        st.dataframe(df_hist, use_container_width=True, hide_index=True)
+    else:
+        st.info("Historique vide pour le moment.")
