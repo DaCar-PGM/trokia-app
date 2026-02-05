@@ -8,3 +8,4 @@ requests
 beautifulsoup4
 duckduckgo-search>=6.0.0
 statistics
+google-search-results
