@@ -12,7 +12,7 @@ import requests
 from bs4 import BeautifulSoup
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="Trokia v13.2 : Visual Fixed", page_icon="👁️", layout="wide")
+st.set_page_config(page_title="Trokia v14 : Ultimate Hybrid", page_icon="💎", layout="wide")
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -20,7 +20,7 @@ HEADERS = {
     "Accept-Language": "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7"
 }
 
-# --- 1. IA ---
+# --- 1. IA & VISUEL ---
 def configurer_modele():
     try:
         api_key = st.secrets["GEMINI_API_KEY"]
@@ -34,9 +34,8 @@ def analyser_image_multi(image_pil, modele):
     try:
         model = genai.GenerativeModel(modele)
         prompt = (
-            "Analyse cette image. Donne-moi la CATÉGORIE (VETEMENT, MEUBLE, TECH, AUTRE)."
-            "Liste 4 propositions de modèles précis."
-            "Format:\nCAT: ...\n1. ...\n2. ...\n3. ...\n4. ..."
+            "Analyse cette image. Donne la CATÉGORIE (VETEMENT, MEUBLE, TECH, AUTRE)."
+            "Liste 4 modèles précis. Format:\nCAT: ...\n1. ...\n2. ...\n3. ...\n4. ..."
         )
         response = model.generate_content([prompt, image_pil])
         text = response.text.strip()
@@ -49,36 +48,24 @@ def analyser_image_multi(image_pil, modele):
         return propositions, cat, None
     except Exception as e: return [], "AUTRE", str(e)
 
-# --- 2. RECUPERATION VISUELLE (ROBUSTE) ---
 def get_thumbnail(query):
-    """
-    Version Améliorée : Scanne plusieurs items et filtre les 'pixels invisibles' (.gif)
-    """
+    """Récupère une image de référence pour valider le produit"""
     try:
         clean = re.sub(r'[^\w\s]', '', query).strip()
         url = f"https://www.ebay.fr/sch/i.html?_nkw={clean.replace(' ', '+')}"
         r = requests.get(url, headers=HEADERS, timeout=5)
         soup = BeautifulSoup(r.text, 'html.parser')
-        
-        # On regarde les 5 premiers résultats pour trouver une vraie image
         items = soup.select('.s-item')
-        
         for item in items:
-            # On cherche l'image dans cet item
             img_tag = item.select_one('.s-item__image-img')
             if not img_tag: img_tag = item.select_one('img')
-            
             if img_tag:
-                # On teste src et data-src
-                candidates = [img_tag.get('data-src'), img_tag.get('src')]
-                for src in candidates:
-                    # LE FILTRE MAGIQUE : Doit être une URL, contenir 'ebayimg' et PAS être un GIF
-                    if src and src.startswith('http') and 'ebayimg.com' in src and '.gif' not in src:
-                        return src
-                        
+                cand = img_tag.get('data-src') or img_tag.get('src')
+                if cand and 'ebayimg.com' in cand: return cand
     except: pass
-    return "https://via.placeholder.com/300x200.png?text=Image+Introuvable"
+    return "https://via.placeholder.com/300x200.png?text=Pas+d'image"
 
+# --- 2. MOTEURS DE PRIX ---
 def generer_lien(nom, site): return f"https://www.google.com/search?q=site:{site}+{nom.replace(' ', '+')}"
 
 def scan_bing(nom, site):
@@ -97,7 +84,6 @@ def scan_ebay(recherche):
         prices = [float(p.replace(",", ".").replace(" ", "")) for p in re.findall(r"(?:EUR|€)\s*([\d\s\.,]+)|([\d\s\.,]+)\s*(?:EUR|€)", r.text) for x in p if x and 2 < float(x.replace(",", ".").replace(" ", "")) < 5000]
         soup = BeautifulSoup(r.text, 'html.parser')
         
-        # Extraction image principale aussi corrigée
         img_url = ""
         items = soup.select('.s-item')
         for item in items:
@@ -107,7 +93,6 @@ def scan_ebay(recherche):
                  if cand and 'ebayimg.com' in cand:
                      img_url = cand
                      break
-            
         return (sum(prices)/len(prices) if prices else 0), len(prices), img_url, url
     except: return 0, 0, "", ""
 
@@ -133,107 +118,128 @@ def get_historique(sheet):
     return pd.DataFrame()
 
 # --- UI ---
-st.title("💼 Trokia v13.2 : Visual Selector (Corrigé)")
+st.title("💎 Trokia v14 : L'Hybride")
 
 if 'modele_ia' not in st.session_state: st.session_state.modele_ia = configurer_modele()
 sheet = connecter_sheets()
 
-# STATE
+# VARIABLES GLOBALES ET STATE
+if 'nom_final' not in st.session_state: st.session_state.nom_final = ""
+if 'go_search' not in st.session_state: st.session_state.go_search = False
 if 'props' not in st.session_state: st.session_state.props = []
 if 'props_imgs' not in st.session_state: st.session_state.props_imgs = []
-if 'cat' not in st.session_state: st.session_state.cat = ""
 if 'current_img' not in st.session_state: st.session_state.current_img = None
 
-# RESET
-if st.button("🔄 Nouveau Scan"):
+# FONCTION DE RESET GLOBAL
+def reset_all():
+    st.session_state.nom_final = ""
+    st.session_state.go_search = False
     st.session_state.props = []
     st.session_state.props_imgs = []
-    st.session_state.cat = ""
     st.session_state.current_img = None
+
+if st.button("🔄 Nouveau Scan / Reset"):
+    reset_all()
     st.rerun()
 
-mode = st.radio("Source", ["Caméra", "Galerie"], horizontal=True, label_visibility="collapsed")
-f = st.camera_input("Scanner") if mode == "Caméra" else st.file_uploader("Image")
+# --- ONGLETS PRINCIPAUX ---
+tab_photo, tab_manuel = st.tabs(["📸 Scan Photo (IA)", "⌨️ Recherche Manuelle / EAN"])
 
-# LOGIQUE
-if f:
-    if st.session_state.current_img != f.name:
-        st.session_state.current_img = f.name
-        with st.spinner("🤖 L'IA identifie les modèles potentiels..."):
-            p, c, e = analyser_image_multi(Image.open(f), st.session_state.modele_ia)
-            if p: 
-                st.session_state.props = p
-                st.session_state.cat = c
-                
-                with st.spinner("📸 Récupération des vraies photos..."):
-                    imgs = []
-                    for prop in p:
-                        imgs.append(get_thumbnail(prop))
+# --- ONGLET 1 : IA PHOTO ---
+with tab_photo:
+    mode = st.radio("Mode", ["Caméra", "Galerie"], horizontal=True, label_visibility="collapsed")
+    f = st.camera_input("Scanner") if mode == "Caméra" else st.file_uploader("Image")
+
+    if f:
+        if st.session_state.current_img != f.name:
+            st.session_state.current_img = f.name
+            with st.spinner("🤖 Analyse IA..."):
+                p, c, e = analyser_image_multi(Image.open(f), st.session_state.modele_ia)
+                if p: 
+                    st.session_state.props = p
+                    imgs = [get_thumbnail(prop) for prop in p]
                     st.session_state.props_imgs = imgs
-                st.rerun()
-
-    # SECTION 1 : VISUAL SELECTION
-    st.write("### 1️⃣ Quel modèle correspond le mieux ?")
-    
-    if st.session_state.props:
-        cols = st.columns(len(st.session_state.props))
-        
-        for i, col in enumerate(cols):
-            with col:
-                # Affichage image avec un fallback si la liste est plus courte
-                if i < len(st.session_state.props_imgs):
-                    st.image(st.session_state.props_imgs[i], use_container_width=True)
-                st.caption(f"**{st.session_state.props[i]}**")
-        
-        option_choisie = st.radio(
-            "Sélectionnez le modèle identique :", 
-            st.session_state.props + ["Autre (Je saisis le nom)"],
-            horizontal=False
-        )
-        
-        if option_choisie == "Autre (Je saisis le nom)":
-            nom_final = st.text_input("Saisissez le modèle exact :")
-        else:
-            nom_final = option_choisie
-            
-        go = st.button("✅ C'est celui-là -> ESTIMER", type="primary", use_container_width=True)
-
-        # SECTION 2 : ESTIMATION
-        if go and nom_final:
-            st.write("---")
-            with st.spinner(f"Calcul de la cote pour : {nom_final}..."):
-                ep, en, ei, eu = scan_ebay(nom_final)
-                lp, ln, lu = scan_bing(nom_final, "leboncoin.fr")
-                rp, rn, ru = scan_bing(nom_final, "fr.shopping.rakuten.com")
-                vp, vn, vu = 0, 0, generer_lien(nom_final, "vinted.fr")
-                if "VETEMENT" in st.session_state.cat: vp, _, _ = scan_bing(nom_final, "vinted.fr")
-
-            k1, k2, k3, k4 = st.columns(4)
-            k1.metric("eBay (Cote)", f"{ep:.2f} €" if ep else "-", f"{en} vtes"); k1.link_button("Voir", eu)
-            k2.metric("LBC", f"{lp:.0f} €" if lp else "-"); k2.link_button("Voir", lu)
-            k3.metric("Rakuten", f"{rp:.0f} €" if rp else "-"); k3.link_button("Voir", ru)
-            k4.metric("Vinted", f"{vp:.0f} €" if vp else "-"); k4.link_button("Voir", vu)
-
-            st.write("---")
-            st.markdown("### 💰 Calculateur de Marge")
-            sugg = ep if ep > 0 else (lp if lp > 0 else 0.0)
-            
-            col_c1, col_c2, col_c3 = st.columns(3)
-            pv = col_c1.number_input("Vente (€)", value=float(sugg), step=1.0)
-            pa = col_c2.number_input("Achat (€)", 0.0, step=1.0)
-            marge = pv - pa - (pv * 0.15)
-            
-            col_c3.metric("Marge Nette", f"{marge:.2f} €", delta="Profit" if marge > 0 else "Perte")
-
-            if st.button("💾 Sauvegarder", use_container_width=True):
-                if sheet:
-                    sheet.append_row([datetime.now().strftime("%d/%m %H:%M"), nom_final, pv, pa, f"{marge:.2f}", ei])
-                    st.success("Enregistré !")
-                    time.sleep(1)
                     st.rerun()
 
-    else:
-        st.info("Prenez une photo pour démarrer.")
+        if st.session_state.props:
+            st.write("#### Choisissez le bon modèle :")
+            cols = st.columns(len(st.session_state.props))
+            for i, col in enumerate(cols):
+                with col:
+                    if i < len(st.session_state.props_imgs):
+                        st.image(st.session_state.props_imgs[i], use_container_width=True)
+                    st.caption(f"**{st.session_state.props[i]}**")
+            
+            choix = st.radio("Votre choix :", st.session_state.props + ["Autre"], horizontal=False)
+            if st.button("Valider ce modèle", type="primary"):
+                if choix == "Autre":
+                    st.warning("Passez en mode 'Recherche Manuelle' pour taper le nom.")
+                else:
+                    st.session_state.nom_final = choix
+                    st.session_state.go_search = True
+                    st.rerun()
+
+# --- ONGLET 2 : MANUEL / CODE BARRE ---
+with tab_manuel:
+    st.info("💡 Scannez un code-barre ici ou tapez un nom (ex: 'PlayStation 5').")
+    
+    # Formulaire pour gérer la touche "Entrée"
+    with st.form(key='search_form'):
+        query_input = st.text_input("Recherche (Nom ou EAN)")
+        submit_button = st.form_submit_button(label='🔎 Lancer la recherche')
+        
+    if submit_button and query_input:
+        st.session_state.nom_final = query_input
+        st.session_state.go_search = True
+        st.rerun()
+
+# --- SECTION COMMUNE : RÉSULTATS & PRIX ---
+if st.session_state.go_search and st.session_state.nom_final:
+    st.divider()
+    st.markdown(f"### 🎯 Résultat pour : **{st.session_state.nom_final}**")
+    
+    # Image de référence (si pas déjà chargée via IA)
+    if not st.session_state.props_imgs:
+        ref_img = get_thumbnail(st.session_state.nom_final)
+        c_img, _ = st.columns([1,3])
+        c_img.image(ref_img, width=150, caption="Réf. Marché")
+    
+    with st.spinner("Scraping des prix..."):
+        ep, en, ei, eu = scan_ebay(st.session_state.nom_final)
+        lp, ln, lu = scan_bing(st.session_state.nom_final, "leboncoin.fr")
+        rp, rn, ru = scan_bing(st.session_state.nom_final, "fr.shopping.rakuten.com")
+        vp, vn, vu = 0, 0, generer_lien(st.session_state.nom_final, "vinted.fr")
+        # On tente Vinted si le nom contient des mots clés de vêtements (simplifié)
+        if any(x in st.session_state.nom_final.lower() for x in ['shirt', 'pantalon', 'veste', 'nike', 'adidas', 'zara']):
+            vp, _, _ = scan_bing(st.session_state.nom_final, "vinted.fr")
+
+    # DASHBOARD
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("eBay (Cote)", f"{ep:.2f} €" if ep else "-", f"{en} vtes"); k1.link_button("Voir", eu)
+    k2.metric("LBC", f"{lp:.0f} €" if lp else "-"); k2.link_button("Voir", lu)
+    k3.metric("Rakuten", f"{rp:.0f} €" if rp else "-"); k3.link_button("Voir", ru)
+    k4.metric("Vinted", f"{vp:.0f} €" if vp else "-"); k4.link_button("Voir", vu)
+
+    # CALCULATRICE
+    st.write("---")
+    st.markdown("#### 💰 Calculateur de Marge")
+    sugg = ep if ep > 0 else (lp if lp > 0 else 0.0)
+    
+    cc1, cc2, cc3 = st.columns(3)
+    pv = cc1.number_input("Vente (€)", value=float(sugg), step=1.0)
+    pa = cc2.number_input("Achat (€)", 0.0, step=1.0)
+    marge = pv - pa - (pv * 0.15)
+    cc3.metric("Marge Nette", f"{marge:.2f} €", delta="Profit" if marge > 0 else "Perte")
+
+    if st.button("💾 Sauvegarder", use_container_width=True):
+        if sheet:
+            img_save = ei if ei else (st.session_state.props_imgs[0] if st.session_state.props_imgs else "")
+            sheet.append_row([datetime.now().strftime("%d/%m %H:%M"), st.session_state.nom_final, pv, pa, f"{marge:.2f}", img_save])
+            st.success("Enregistré !")
+            time.sleep(1)
+            # Reset partiel pour enchainer
+            st.session_state.go_search = False
+            st.rerun()
 
 # HISTORIQUE
 st.write("---")
