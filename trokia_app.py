@@ -15,34 +15,30 @@ from selenium.webdriver.common.by import By
 from webdriver_manager.chrome import ChromeDriverManager
 
 # --- 1. CONFIGURATION ---
-st.set_page_config(page_title="Trokia Ultimate v2", page_icon="💎", layout="wide")
+st.set_page_config(page_title="Trokia Ultimate v2.1", page_icon="💎", layout="wide")
 
-# --- 2. INTELLIGENCE ARTIFICIELLE (AUTO-RÉPARATION) ---
+# --- 2. INTELLIGENCE ARTIFICIELLE ---
 def configurer_ia():
     try:
         api_key = st.secrets["GEMINI_API_KEY"]
         genai.configure(api_key=api_key)
         return True
     except Exception as e:
-        st.error(f"❌ Erreur Clé API : {e}")
         return False
 
-def analyser_image_robuste(image_pil):
-    """Tente plusieurs modèles d'IA si le premier échoue."""
-    modeles_a_tester = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-pro-vision']
-    
+def analyser_image_detective(image_pil):
+    """Tente un modèle et renvoie l'erreur exacte si ça échoue."""
+    # On tente le modèle le plus robuste d'abord
+    nom_modele = 'gemini-pro-vision'
     prompt = "Tu es un expert brocanteur. Analyse cette image et donne-moi UNIQUEMENT : la Marque, le Modèle et le type d'objet. Sois précis pour une recherche eBay."
 
-    for nom_modele in modeles_a_tester:
-        try:
-            model = genai.GenerativeModel(nom_modele)
-            response = model.generate_content([prompt, image_pil])
-            return response.text.strip()
-        except Exception as e:
-            # On continue silencieusement vers le prochain modèle
-            continue
-    
-    return None # Si tout a échoué
+    try:
+        model = genai.GenerativeModel(nom_modele)
+        response = model.generate_content([prompt, image_pil])
+        return response.text.strip(), None # Succès, pas d'erreur
+    except Exception as e:
+        # On renvoie l'erreur exacte pour l'afficher
+        return None, str(e)
 
 # --- 3. CONNEXION GOOGLE SHEETS ---
 def connecter_sheets():
@@ -54,9 +50,7 @@ def connecter_sheets():
         client = gspread.authorize(creds)
         sheet = client.open("Trokia_DB").sheet1
         return sheet
-    except Exception as e:
-        # On évite d'afficher l'erreur technique brute à l'utilisateur si possible
-        st.warning("⚠️ Connexion Sheets instable ou non configurée.")
+    except:
         return None
 
 # --- 4. ROBOT PRIX ---
@@ -77,7 +71,6 @@ def analyser_prix_ebay(recherche):
         driver.get(url)
         time.sleep(2)
         
-        # Image par défaut
         image_url = "https://via.placeholder.com/150?text=No+Image"
         try:
             img_element = driver.find_element(By.CSS_SELECTOR, "div.s-item__image-wrapper img")
@@ -103,7 +96,7 @@ def analyser_prix_ebay(recherche):
         if driver: driver.quit()
 
 # --- 5. INTERFACE ---
-st.title("💎 Trokia : Système Expert")
+st.title("💎 Trokia : Mode Détective 🕵️‍♂️")
 
 sheet = connecter_sheets()
 ia_ok = configurer_ia()
@@ -126,20 +119,22 @@ with tab2:
     
     if img_file and st.button("Lancer l'Analyse IA ✨"):
         if not ia_ok:
-            st.error("Clé API manquante !")
+            st.error("Clé API manquante dans les Secrets !")
         else:
             pil_img = Image.open(img_file)
             st.image(pil_img, width=150)
-            with st.spinner("🤖 L'IA identifie l'objet (Test de 3 cerveaux)..."):
-                description = analyser_image_robuste(pil_img)
+            with st.spinner("🤖 L'IA interroge Google..."):
+                # On récupère le résultat OU l'erreur
+                description, erreur_exacte = analyser_image_detective(pil_img)
                 
                 if description:
-                    st.success(f"Trouvé : {description}")
+                    st.success(f"✅ Trouvé : {description}")
                     with st.spinner("Estimation du prix..."):
                         p, i = analyser_prix_ebay(description)
                         st.session_state.res = {'prix': p, 'img': i, 'nom': description}
                 else:
-                    st.error("Aucune IA n'a réussi à voir l'image. Problème technique persistant.")
+                    # On affiche le vrai message d'erreur de Google
+                    st.error(f"❌ Google a refusé l'image. Raison exacte : {erreur_exacte}")
 
 # RÉSULTATS
 if 'res' in st.session_state:
@@ -152,5 +147,5 @@ if 'res' in st.session_state:
         achat = st.number_input("Prix Achat", 0.0)
         if st.button("Sauvegarder"):
             if sheet:
-                sheet.append_row([datetime.now().str(), r['nom'], r['prix'], achat, "Trokia v2", r['img']])
+                sheet.append_row([datetime.now().str(), r['nom'], r['prix'], achat, "Trokia v2.1", r['img']])
                 st.success("Sauvegardé !")
