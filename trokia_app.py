@@ -15,7 +15,7 @@ from selenium.webdriver.common.by import By
 from webdriver_manager.chrome import ChromeDriverManager
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="Trokia Ultimate v3.3", page_icon="💎", layout="wide")
+st.set_page_config(page_title="Trokia Ultimate v3.4", page_icon="💎", layout="wide")
 
 # --- 1. IA (AUTO-SÉLECTION) ---
 def configurer_et_trouver_modele():
@@ -23,13 +23,12 @@ def configurer_et_trouver_modele():
         api_key = st.secrets["GEMINI_API_KEY"]
         genai.configure(api_key=api_key)
         
-        # On demande la liste officielle
         liste_modeles = []
         for m in genai.list_models():
             if 'generateContent' in m.supported_generation_methods:
                 liste_modeles.append(m.name)
         
-        # Logique de sélection : Flash > Pro > Vision
+        # Logique : Flash > Pro > Vision
         modele_choisi = next((m for m in liste_modeles if "flash" in m.lower() and "1.5" in m), None)
         if not modele_choisi:
             modele_choisi = next((m for m in liste_modeles if "pro" in m.lower() and "1.5" in m), None)
@@ -46,7 +45,7 @@ def configurer_et_trouver_modele():
 def analyser_image(image_pil, nom_modele_exact):
     try:
         model = genai.GenerativeModel(nom_modele_exact)
-        prompt = "Tu es un expert eBay. Analyse cette photo. Donne-moi UNIQUEMENT le titre court (Marque, Modèle) pour la vente. Pas de phrase."
+        prompt = "Tu es un expert eBay. Analyse cette photo. Donne-moi UNIQUEMENT le titre court (Marque, Modèle) pour la vente. Pas de ponctuation inutile."
         response = model.generate_content([prompt, image_pil])
         return response.text.strip(), None
     except Exception as e:
@@ -64,7 +63,7 @@ def connecter_sheets():
         return client.open("Trokia_DB").sheet1
     except: return None
 
-# --- 3. SCRAPING PRIX (AMÉLIORÉ) ---
+# --- 3. SCRAPING PRIX (BLINDÉ) ---
 def get_driver():
     options = Options()
     options.add_argument("--headless=new") 
@@ -76,46 +75,45 @@ def get_driver():
 def analyser_prix_ebay(recherche):
     try:
         driver = get_driver()
-        # Recherche précise : Ventes réussies uniquement
-        url = "https://www.ebay.fr/sch/i.html?_nkw=" + recherche.replace(" ", "+") + "&LH_Sold=1&LH_Complete=1"
+        # Nettoyage de la recherche (on vire les virgules)
+        clean_recherche = recherche.replace(",", " ").replace(".", " ").strip()
+        
+        # URL eBay : Ventes réussies
+        url = "https://www.ebay.fr/sch/i.html?_nkw=" + clean_recherche.replace(" ", "+") + "&LH_Sold=1&LH_Complete=1"
         driver.get(url)
         time.sleep(2)
         
-        # Récupération image miniature
         img_url = ""
         try: 
             element = driver.find_element(By.CSS_SELECTOR, "div.s-item__image-wrapper img")
             img_url = element.get_attribute("src")
         except: pass
 
-        # --- NOUVEAU SYSTÈME DE PRIX ---
         txt = driver.find_element(By.TAG_NAME, "body").text
         
-        # Regex qui capture "120,50 EUR" ET "EUR 120,50" ET "120,50 €"
-        # On cherche tous les nombres autour des mots clés monétaires
-        raw_prices = re.findall(r"(?:EUR|€)\s*([\d\.,]+)|([\d\.,]+)\s*(?:EUR|€)", txt)
+        # Regex améliorée (gère les espaces insécables des milliers ex: 1 200)
+        raw_prices = re.findall(r"(?:EUR|€)\s*([\d\.,\s]+)|([\d\.,\s]+)\s*(?:EUR|€)", txt)
         
         prix_propres = []
         for p in raw_prices:
-            # raw_prices renvoie des tuples ('', '120,50') ou ('120,50', '')
             val_str = p[0] if p[0] else p[1]
             try:
-                # On remplace la virgule par un point pour le calcul
-                val = float(val_str.replace(',', '.').strip())
-                # Filtre anti-bug (pas de prix à 0€ ou 1 million)
-                if 5 < val < 3000: 
+                # On nettoie tout sauf les chiffres et la virgule décimale
+                # On remplace l'espace par rien, et la virgule par point
+                clean_val = val_str.replace(" ", "").replace("\u202f", "").replace(",", ".")
+                val = float(clean_val)
+                if 5 < val < 5000: 
                     prix_propres.append(val)
             except: continue
         
         driver.quit()
         
-        # Calcul de la moyenne
-        nb_trouves = len(prix_propres)
-        moyenne = sum(prix_propres) / nb_trouves if nb_trouves > 0 else 0
+        nb = len(prix_propres)
+        moyenne = sum(prix_propres) / nb if nb > 0 else 0
         
-        return moyenne, img_url, nb_trouves
+        return moyenne, img_url, nb, url
         
-    except: return 0, "", 0
+    except: return 0, "", 0, "https://www.ebay.fr"
 
 # --- INTERFACE ---
 st.title("💎 Trokia : Automatique")
@@ -138,8 +136,8 @@ with tab1:
     q = st.text_input("Objet")
     if st.button("Estimer"):
         with st.spinner("Analyse..."):
-            p, i, n = analyser_prix_ebay(q)
-            st.session_state.res = {'p': p, 'i': i, 'n': q, 'count': n}
+            p, i, n, u = analyser_prix_ebay(q)
+            st.session_state.res = {'p': p, 'i': i, 'n': q, 'count': n, 'url': u}
 
 with tab2:
     mode = st.radio("Source", ["Caméra", "Galerie"], horizontal=True, label_visibility="collapsed")
@@ -152,8 +150,8 @@ with tab2:
             nom, err = analyser_image(img, st.session_state.modele_ia)
             if nom:
                 st.success(f"Trouvé : {nom}")
-                p, i, n = analyser_prix_ebay(nom)
-                st.session_state.res = {'p': p, 'i': i, 'n': nom, 'count': n}
+                p, i, n, u = analyser_prix_ebay(nom)
+                st.session_state.res = {'p': p, 'i': i, 'n': nom, 'count': n, 'url': u}
             else:
                 st.error(f"Erreur : {err}")
 
@@ -171,11 +169,13 @@ if 'res' in st.session_state:
         if r['p'] > 0:
             st.metric("Cote Moyenne", f"{r['p']:.2f} €", delta=f"{r['count']} ventes analysées")
         else:
-            st.warning("⚠️ Aucun prix trouvé (Objet trop rare ou mal nommé ?)")
+            st.warning("⚠️ Aucun prix trouvé automatiquement.")
             st.metric("Cote", "0.00 €")
+            # Le lien de secours pour comprendre pourquoi
+            st.link_button("🔎 Voir les résultats sur eBay", r['url'])
             
         achat = st.number_input("Achat (€)", 0.0)
         if st.button("Sauvegarder"):
             if sheet:
-                sheet.append_row([datetime.now().strftime("%Y-%m-%d"), r['n'], r['p'], achat, "Auto V3.3", r['i']])
+                sheet.append_row([datetime.now().strftime("%Y-%m-%d"), r['n'], r['p'], achat, "Auto V3.4", r['i']])
                 st.success("Sauvegardé !")
