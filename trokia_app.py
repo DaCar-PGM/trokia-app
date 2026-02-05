@@ -20,7 +20,7 @@ st.set_page_config(page_title="Trokia Vision", page_icon="💎", layout="wide")
 # Configuration IA Vision
 try:
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    model = genai.GenerativeModel('gemini-1.5-pro')
 except:
     st.error("Clé API Gemini manquante dans les Secrets !")
 
@@ -124,3 +124,4 @@ if 'prix' in st.session_state and st.session_state.prix > 0:
             sheet.append_row([date, st.session_state.nom, st.session_state.prix, p_achat, "Auto", st.session_state.img])
             st.balloons()
             st.success("Données sécurisées dans Google Sheets !")
+
