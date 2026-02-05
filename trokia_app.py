@@ -8,24 +8,20 @@ from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime
 import time
 import re
-import random
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from webdriver_manager.chrome import ChromeDriverManager
+import requests
+from bs4 import BeautifulSoup
 
-# --- CONFIGURATION GLOBALE ---
-st.set_page_config(page_title="Trokia v5.0 : Mobile Stealth", page_icon="📱", layout="wide")
+# --- CONFIGURATION ---
+st.set_page_config(page_title="Trokia v6.0 : Light & Fast", page_icon="⚡", layout="wide")
 
-# --- 1. CERVEAU IA (AUTO-ADAPTATIF) ---
+# --- 1. IA (AUTO-SÉLECTION) ---
 def configurer_et_trouver_modele():
     try:
         api_key = st.secrets["GEMINI_API_KEY"]
         genai.configure(api_key=api_key)
         all_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
         
-        # Priorité : Flash > Pro > Vision
+        # Flash > Pro > Vision
         choix = next((m for m in all_models if "flash" in m.lower() and "1.5" in m), None)
         if not choix: choix = next((m for m in all_models if "pro" in m.lower() and "1.5" in m), None)
         if not choix: choix = next((m for m in all_models if "vision" in m.lower()), None)
@@ -36,7 +32,7 @@ def configurer_et_trouver_modele():
 def analyser_image(image_pil, modele):
     try:
         model = genai.GenerativeModel(modele)
-        # Prompt strict pour éviter les phrases
+        # Prompt strict
         prompt = "Analyse cette image pour eBay. Donne-moi UNIQUEMENT : Marque et Modèle. Ex: 'Burton Moto Boots'. Pas de couleur, pas de blabla."
         response = model.generate_content([prompt, image_pil])
         return response.text.strip(), None
@@ -55,58 +51,45 @@ def connecter_sheets():
         return client.open("Trokia_DB").sheet1
     except: return None
 
-# --- 3. NAVIGATEUR MOBILE (L'ARME SECRÈTE) ---
-def get_driver():
-    options = Options()
-    options.add_argument("--headless=new") 
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    
-    # --- DÉGUISEMENT MOBILE ANDROID ---
-    # eBay sert des pages plus simples aux mobiles, souvent moins protégées
-    mobile_ua = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Mobile Safari/537.36"
-    options.add_argument(f"user-agent={mobile_ua}")
-    
-    options.add_argument("--lang=fr-FR")
-    options.add_argument("--disable-blink-features=AutomationControlled")
-    
-    service = Service(ChromeDriverManager().install())
-    return webdriver.Chrome(service=service, options=options)
-
+# --- 3. SCRAPING "REQUESTS" (LÉGER & DISCRET) ---
 def analyser_prix_ebay(recherche):
-    driver = None
     try:
-        driver = get_driver()
         # Nettoyage
         termes = re.sub(r'[^\w\s]', '', recherche).strip()
-        
-        # URL Mobile eBay
         url = f"https://www.ebay.fr/sch/i.html?_nkw={termes.replace(' ', '+')}&LH_Sold=1&LH_Complete=1"
         
-        driver.get(url)
-        time.sleep(random.uniform(2.5, 4.0)) # Pause humaine
-        
-        # 1. TENTATIVE VIA CLASSE CSS (Plus précis)
-        prix_collectes = []
-        try:
-            # Sur mobile/desktop, c'est souvent cette classe
-            elements_prix = driver.find_elements(By.CLASS_NAME, "s-item__price")
-            for el in elements_prix:
-                txt = el.text
-                # On nettoie le texte (Ex: "EUR 50,00" -> 50.0)
-                vals = re.findall(r"[\d\.,]+", txt)
-                for v in vals:
-                    try:
-                        v_clean = float(v.replace(".", "").replace(",", "."))
-                        if 5 < v_clean < 5000: prix_collectes.append(v_clean)
-                    except: continue
-        except: pass
+        # En-têtes pour ressembler à un navigateur normal
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept-Language": "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7"
+        }
 
-        # 2. TENTATIVE VIA REGEX (Si CSS échoue)
+        # Requête directe (pas de navigateur ouvert = moins détectable)
+        response = requests.get(url, headers=headers, timeout=10)
+        
+        if response.status_code != 200:
+            return 0, "", 0, url
+
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Extraction des prix
+        prix_collectes = []
+        
+        # Méthode 1 : Classes CSS eBay
+        items = soup.select('.s-item__price')
+        for item in items:
+            txt = item.get_text()
+            # Nettoyage "120,50 EUR"
+            vals = re.findall(r"[\d\.,]+", txt)
+            for v in vals:
+                try:
+                    v_clean = float(v.replace(".", "").replace(",", "."))
+                    if 5 < v_clean < 5000: prix_collectes.append(v_clean)
+                except: continue
+        
+        # Méthode 2 : Regex brute sur tout le texte si CSS échoue
         if not prix_collectes:
-            page_content = driver.find_element(By.TAG_NAME, "body").text
-            pattern = r"(?:EUR|€)\s*([\d\s\.,]+)|([\d\s\.,]+)\s*(?:EUR|€)"
-            raw_prices = re.findall(pattern, page_content)
+            raw_prices = re.findall(r"(?:EUR|€)\s*([\d\s\.,]+)|([\d\s\.,]+)\s*(?:EUR|€)", response.text)
             for p in raw_prices:
                 val_text = p[0] if p[0] else p[1]
                 try:
@@ -115,39 +98,34 @@ def analyser_prix_ebay(recherche):
                     if 5 < val < 5000: prix_collectes.append(val)
                 except: continue
 
-        # Image
+        # Image (Première image trouvée)
         img_url = ""
         try:
-            imgs = driver.find_elements(By.CSS_SELECTOR, "div.s-item__image-wrapper img")
-            if len(imgs) > 0: img_url = imgs[0].get_attribute("src")
+            img_tag = soup.select_one('.s-item__image-wrapper img')
+            if img_tag: img_url = img_tag.get('src')
         except: pass
 
-        driver.quit()
-        
         nb = len(prix_collectes)
         moyenne = sum(prix_collectes) / nb if nb > 0 else 0
         
         return moyenne, img_url, nb, url
-        
+
     except Exception as e:
+        print(f"Erreur: {e}")
         return 0, "", 0, "https://www.ebay.fr"
-    finally:
-        if driver: 
-            try: driver.quit()
-            except: pass
 
 # --- INTERFACE ---
-st.title("💎 Trokia v5.0 : Mobile Stealth")
+st.title("💎 Trokia v6.0 : Light Mode")
 
 if 'modele_ia' not in st.session_state:
-    with st.spinner("Démarrage Système..."):
+    with st.spinner("Connexion IA..."):
         st.session_state.modele_ia = configurer_et_trouver_modele()
 
 if not st.session_state.modele_ia:
-    st.error("❌ Erreur IA Fatal")
+    st.error("❌ Erreur IA")
     st.stop()
 else:
-    st.caption(f"🤖 Cerveau : {st.session_state.modele_ia}")
+    st.caption(f"🧠 Cerveau : {st.session_state.modele_ia}")
 
 sheet = connecter_sheets()
 
@@ -156,7 +134,7 @@ tab1, tab2 = st.tabs(["🔎 Recherche", "📸 Scanner"])
 with tab1:
     q = st.text_input("Objet")
     if st.button("Estimer"):
-        with st.spinner("Scraping Mobile..."):
+        with st.spinner("Recherche rapide..."):
             p, i, n, u = analyser_prix_ebay(q)
             st.session_state.res = {'p': p, 'i': i, 'n': q, 'c': n, 'u': u}
 
@@ -167,7 +145,7 @@ with tab2:
     if f and st.button("Lancer 🚀"):
         img = Image.open(f)
         st.image(img, width=200)
-        with st.spinner("Identification & Estimation..."):
+        with st.spinner("Analyse..."):
             nom, err = analyser_image(img, st.session_state.modele_ia)
             if nom:
                 st.success(f"Objet : {nom}")
@@ -188,23 +166,21 @@ if 'res' in st.session_state:
     with c2:
         st.markdown(f"### {r['n']}")
         
-        # LOGIQUE D'AFFICHAGE ULTIME
         if r['p'] > 0:
-            st.metric("Cote Moyenne", f"{r['p']:.2f} €", delta=f"{r['c']} ventes")
+            st.metric("Cote Moyenne", f"{r['p']:.2f} €", delta=f"{r['c']} résultats")
             st.link_button("Vérifier sur eBay", r['u'])
+            val_default = float(r['p'])
         else:
-            st.warning("⚠️ Prix non détecté (Sécurité eBay active).")
-            st.info("👇 Cliquez ci-dessous pour voir la cote réelle et saisir le prix.")
-            st.link_button("🔎 Voir la cote sur eBay", r['u'])
+            st.warning("⚠️ Prix non accessible automatiquement.")
+            st.info("Le robot a été bloqué, mais l'IA a fait le travail d'identification.")
+            st.link_button("🔎 Voir la cote manuellement", r['u'])
+            val_default = 0.0
         
-        # SAISIE INTELLIGENTE
-        # Si le prix est trouvé, on le met par défaut, sinon 0
-        val_default = float(r['p']) if r['p'] > 0 else 0.0
+        # SAISIE MANUELLE OBLIGATOIRE SI 0€
         prix_estime_final = st.number_input("Cote Retenue (€)", value=val_default, step=1.0)
-        
         achat = st.number_input("Prix Achat (€)", 0.0, step=1.0)
         
         if st.button("💾 Enregistrer"):
             if sheet:
-                sheet.append_row([datetime.now().strftime("%d/%m/%Y"), r['n'], prix_estime_final, achat, "Mobile v5", r['i']])
+                sheet.append_row([datetime.now().strftime("%d/%m/%Y"), r['n'], prix_estime_final, achat, "Trokia v6", r['i']])
                 st.success("Sauvegardé !")
