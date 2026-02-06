@@ -1,4 +1,6 @@
 import streamlit as st
+import google.generativeai as genai
+from PIL import Image
 import pandas as pd
 import json
 import gspread
@@ -6,193 +8,150 @@ from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime
 import time
 import re
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from webdriver_manager.chrome import ChromeDriverManager
+import requests
+from bs4 import BeautifulSoup
+from duckduckgo_search import DDGS
+import statistics
+import random
 
-# --- CONFIGURATION DU SITE ---
-st.set_page_config(page_title="Trokia Cloud", page_icon="☁️", layout="wide")
+# --- CONFIGURATION PRO ---
+st.set_page_config(page_title="Trokia v18.5 : Argus Pro", page_icon="⚖️", layout="wide")
 
-# --- CONNEXION INTELLIGENTE A GOOGLE SHEETS ---
-def connecter_sheets():
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Mobile/15E148 Safari/604.1"
+]
+
+# --- 1. MOTEUR IA FURTIF (MULTI-MODÈLES) ---
+def obtenir_meilleur_modele():
     try:
-        # On lit le secret formaté proprement
-        json_str = st.secrets["service_account_info"]
-        creds_dict = json.loads(json_str)
-        
-        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-        client = gspread.authorize(creds)
-        
-        # Ouvre le fichier
-        sheet = client.open("Trokia_DB").sheet1
-        return sheet
-    except Exception as e:
-        st.error(f"⚠️ Erreur de connexion au Cloud : {e}")
-        st.info("Vérifiez que le fichier Google Sheets s'appelle bien 'Trokia_DB' et que le robot est éditeur.")
-        return None
+        api_key = st.secrets["GEMINI_API_KEY"]
+        genai.configure(api_key=api_key)
+        models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        # Priorité au modèle Pro pour une expertise chirurgicale
+        for m in ["models/gemini-1.5-pro", "models/gemini-1.5-flash"]:
+            if m in models: return m
+        return models[0]
+    except: return "gemini-1.5-flash"
 
-# --- IA & SCAN ---
-def deviner_categorie(nom_produit):
-    nom = str(nom_produit).lower()
-    regles = {
-        "🎮 Gaming": ["ps5", "ps4", "switch", "nintendo", "xbox", "jeu", "zelda", "mario", "manette", "console", "gameboy", "game boy", "pokemon", "sega"],
-        "📱 Téléphonie": ["iphone", "samsung", "galaxy", "xiaomi", "redmi", "pixel", "huawei", "smartphone", "oppo", "nokia"],
-        "💻 Informatique": ["macbook", "dell", "hp", "asus", "lenovo", "ordinateur", "pc", "laptop", "clavier", "souris", "usb", "ipad", "tablette", "geforce", "nvidia"],
-        "📸 Photo/Vidéo": ["canon", "nikon", "sony alpha", "gopro", "camera", "objectif", "instax", "lumix", "kodak"],
-        "📚 Livres/Culture": ["livre", "roman", "bd", "manga", "tome", "album", "cd", "dvd", "blu-ray", "vinyle", "collector"],
-        "👟 Mode/Luxe": ["nike", "adidas", "jordan", "yeezy", "sac", "montre", "rolex", "seiko", "vêtement", "gucci", "vuitton"],
-        "🏠 Maison/Électro": ["aspirateur", "dyson", "cafetière", "robot", "cuisine", "outil", "bricolage", "bosch", "makita"]
-    }
-    for categorie, mots_cles in regles.items():
-        if any(mot in nom for mot in mots_cles): return categorie
-    return "📦 Divers"
-
-def configurer_navigateur():
-    options = Options()
-    options.add_argument("--headless=new") 
-    options.add_argument("--window-size=1920,1080")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    return options
-
-def analyser_produit_ebay(driver, recherche):
-    url = "https://www.ebay.fr/sch/i.html?_nkw=" + recherche.replace(" ", "+") + "&LH_Sold=1&LH_Complete=1"
-    driver.get(url)
-    time.sleep(2)
-    
-    image_url = "https://via.placeholder.com/150?text=No+Image"
+def analyser_objet_expert(image_pil):
+    default_res = {"nom": "Objet Inconnu", "cat": "AUTRE", "mat": "N/A", "etat": "3", "score": "5"}
     try:
-        img_element = driver.find_element(By.CSS_SELECTOR, "div.s-item__image-wrapper img")
-        src = img_element.get_attribute("src")
-        if src: image_url = src
-    except: pass
-
-    texte = driver.find_element(By.TAG_NAME, "body").text
-    motifs = re.findall(r"(\d+[\.,]?\d*)\s*EUR", texte)
-    prix_liste = []
-    for p in motifs:
-        try:
-            val = float(p.replace(',', '.').strip())
-            if 1 < val < 10000: prix_liste.append(val)
-        except: continue
-    
-    prix_final = sum(prix_liste) / len(prix_liste) if prix_liste else 0
-    return prix_final, image_url
-
-# --- INTERFACE UTILISATEUR ---
-st.title("💎 Trokia Cloud : Master System")
-
-# 1. Connexion
-sheet = connecter_sheets()
-if not sheet: st.stop()
-
-# 2. Récupération des données
-try:
-    data = sheet.get_all_records()
-    df = pd.DataFrame(data)
-    # Initialisation si vide
-    cols_requises = ["Date", "Produit", "Estimation", "Prix Achat", "Catégorie", "Image"]
-    if df.empty or not all(col in df.columns for col in cols_requises):
-        df = pd.DataFrame(columns=cols_requises)
-except:
-    df = pd.DataFrame(columns=["Date", "Produit", "Estimation", "Prix Achat", "Catégorie", "Image"])
-
-col_scan, col_kpi = st.columns([1, 2])
-
-# GAUCHE : SCANNER
-with col_scan:
-    st.markdown("### ☁️ Scanner Cloud")
-    entree = st.text_input("Rechercher un produit", key="input_scan")
-    
-    if st.button("Lancer l'Analyse 🚀", use_container_width=True):
-        if entree:
-            with st.spinner("Analyse du marché en cours..."):
-                try:
-                    service = Service(ChromeDriverManager().install())
-                    driver = webdriver.Chrome(service=service, options=configurer_navigateur())
-                    prix, img = analyser_produit_ebay(driver, entree)
-                    driver.quit()
-                    
-                    st.session_state.temp_prix = prix
-                    st.session_state.temp_img = img
-                    st.session_state.temp_produit = entree
-                except Exception as e:
-                    st.error(f"Erreur technique : {e}")
-
-    if 'temp_prix' in st.session_state and st.session_state.temp_prix > 0:
-        valeur = round(st.session_state.temp_prix, 2)
-        
-        c1, c2 = st.columns([1, 2])
-        with c1:
-            st.image(st.session_state.temp_img, caption="Aperçu", width=120)
-        with c2:
-            st.success(f"Cote : **{valeur} €**")
-            prix_achat = st.number_input("Prix d'achat (€)", min_value=0.0, step=1.0, key="achat_input")
-            
-        if st.button("💾 Sauvegarder (Google Sheets)", use_container_width=True):
-            cat = deviner_categorie(st.session_state.temp_produit)
-            date_now = datetime.now().strftime("%Y-%m-%d %H:%M")
-            
-            # Préparation de la ligne
-            # Note : on force la conversion en float pour Google Sheets
-            nouvelle_ligne = [
-                date_now, 
-                st.session_state.temp_produit, 
-                str(valeur).replace('.', ','), 
-                str(prix_achat).replace('.', ','), 
-                cat, 
-                st.session_state.temp_img
-            ]
-            
-            # Si vide, on met les titres d'abord
-            if df.empty:
-                 sheet.append_row(["Date", "Produit", "Estimation", "Prix Achat", "Catégorie", "Image"])
-            
-            sheet.append_row(nouvelle_ligne)
-            
-            st.toast("Produit ajouté à la base de données !", icon="☁️")
-            del st.session_state.temp_prix
-            time.sleep(1)
-            st.rerun()
-
-# DROITE : DASHBOARD
-with col_kpi:
-    st.markdown("### 📊 Données Temps Réel")
-    
-    if not df.empty and "Estimation" in df.columns:
-        # Nettoyage des données pour les calculs (remplace virgules par points)
-        try:
-            df["Estimation_Calc"] = df["Estimation"].astype(str).str.replace(',', '.').astype(float)
-            df["Achat_Calc"] = df["Prix Achat"].astype(str).str.replace(',', '.').astype(float)
-        except:
-            df["Estimation_Calc"] = 0.0
-            df["Achat_Calc"] = 0.0
-            
-        total_valeur = df["Estimation_Calc"].sum()
-        total_investi = df["Achat_Calc"].sum()
-        profit = total_valeur - total_investi
-        
-        # KPI
-        k1, k2, k3 = st.columns(3)
-        k1.metric("Valeur Stock", f"{round(total_valeur, 2)} €")
-        k2.metric("Investissement", f"{round(total_investi, 2)} €")
-        k3.metric("PROFIT NET", f"{round(profit, 2)} €", delta=f"{round((profit/total_investi)*100) if total_investi>0 else 0}%")
-        
-        # Tableau avec Images
-        st.markdown("---")
-        st.dataframe(
-            df[["Date", "Produit", "Estimation", "Prix Achat", "Catégorie", "Image"]],
-            column_config={
-                "Image": st.column_config.ImageColumn("Aperçu", width="small"),
-                "Estimation": st.column_config.NumberColumn("Cote (€)"),
-                "Prix Achat": st.column_config.NumberColumn("Achat (€)"),
-            },
-            use_container_width=True,
-            hide_index=True
+        model = genai.GenerativeModel(obtenir_meilleur_modele())
+        prompt = (
+            "En tant qu'expert d'Argus, analyse cette image. Identifie marque et modèle exact. "
+            "Détaille les matériaux (ex: bois massif, métal brossé). Évalue l'état d'usage (1-5)."
+            "\nFormat STRICT : NOM: ... | CAT: ... | MAT: ... | ETAT: ... | SCORE: ..."
         )
-    else:
-        st.info("👋 Bienvenue ! Scannez votre premier objet pour initialiser la base de données.")
+        response = model.generate_content([prompt, image_pil])
+        t = response.text.strip()
+        res = default_res.copy()
+        if "NOM:" in t: res["nom"] = t.split("NOM:")[1].split("|")[0].strip()
+        if "MAT:" in t: res["mat"] = t.split("MAT:")[1].split("|")[0].strip()
+        if "ETAT:" in t: res["etat"] = t.split("ETAT:")[1].split("|")[0].strip()
+        return res
+    except: return default_res
+
+# --- 2. MOTEUR DE PRIX (VENDUS + WEB) ---
+def clean_price(val_str):
+    if not val_str: return None
+    val_str = re.sub(r'[^\d,\.]', '', val_str)
+    try: return float(val_str.replace(",", "."))
+    except: return None
+
+def scan_global_cote(nom):
+    prices = []
+    try:
+        clean_name = re.sub(r'[^\w\s]', '', nom).strip()
+        headers = {"User-Agent": random.choice(USER_AGENTS)}
+        
+        # EBAY VENDUS (La base de la cote)
+        url_ebay = f"https://www.ebay.fr/sch/i.html?_nkw={clean_name.replace(' ', '+')}&LH_Sold=1&LH_Complete=1"
+        r = requests.get(url_ebay, headers=headers, timeout=10)
+        soup = BeautifulSoup(r.text, 'html.parser')
+        for tag in soup.select('.s-item__price'):
+            p = clean_price(tag.get_text())
+            if p and 1 < p < 10000: prices.append(p)
+
+        # WEB GLOBAL (Tendances)
+        with DDGS() as ddgs:
+            results = list(ddgs.text(f"prix vendu {nom} leboncoin vinted", max_results=10))
+            for res in results:
+                found = re.findall(r"(\d+[\s\.,]?\d*)\s?(?:€|eur)", res.get('body', '').lower())
+                for f in found:
+                    p = clean_price(f)
+                    if p and 1 < p < 10000: prices.append(p)
+
+        cote = statistics.median(prices) if prices else 0
+        liq = "🔥 Élevée" if len(prices) > 12 else "Moyenne"
+        return cote, liq
+    except: return 0, "Inconnue"
+
+def get_thumbnail(query):
+    try:
+        with DDGS() as ddgs:
+            results = list(ddgs.images(keywords=query, region="fr-fr", max_results=1))
+            return results[0]['image'] if results else "https://via.placeholder.com/150"
+    except: return "https://via.placeholder.com/150"
+
+# --- 3. UI & LOGIQUE ---
+if 'objet_a' not in st.session_state: st.session_state.objet_a = None
+if 'last_scan' not in st.session_state: st.session_state.last_scan = None
+
+st.title("⚖️ Trokia Pro : L'Argus Universel")
+
+if st.button("🔄 Remise à zéro complète", use_container_width=True):
+    st.session_state.objet_a = None
+    st.session_state.last_scan = None
+    st.rerun()
+
+tab_photo, tab_manuel, tab_troc = st.tabs(["📸 Scan Photo", "⌨️ Clavier / EAN", "⚖️ Balance d'Échange"])
+
+with tab_photo:
+    col_l, col_r = st.columns([1, 2])
+    with col_l:
+        f = st.camera_input("Scanner")
+        if not f: f = st.file_uploader("Importer", type=['jpg', 'png', 'jpeg'])
+    
+    if f:
+        with st.spinner("Analyse experte en cours..."):
+            data = analyser_objet_expert(Image.open(f))
+            cote, liq = scan_global_cote(data['nom'])
+            st.session_state.last_scan = {"nom": data['nom'], "prix": cote, "img": get_thumbnail(data['nom']), "mat": data['mat']}
+            
+            with col_r:
+                st.header(data['nom'])
+                st.metric("Valeur Argus", f"{cote:.0f} €", delta=f"Liquidité: {liq}")
+                st.write(f"**Matériaux :** {data['mat']}")
+                if st.button("⚖️ Ajouter au TROC (Slot A)", key="a_ph"):
+                    st.session_state.objet_a = st.session_state.last_scan
+                    st.success("Mémorisé !")
+
+with tab_manuel:
+    with st.form("man"):
+        q_in = st.text_input("Nom ou Code-Barre")
+        if st.form_submit_button("🔎 Estimer"):
+            with st.spinner("Calcul..."):
+                cote, liq = scan_global_cote(q_in)
+                st.session_state.last_scan = {"nom": q_in, "prix": cote, "img": get_thumbnail(q_in), "mat": "Manuel"}
+                st.metric("Prix Marché", f"{cote:.0f} €")
+                if st.button("⚖️ Ajouter au TROC (Slot A)", key="a_man"):
+                    st.session_state.objet_a = st.session_state.last_scan
+
+with tab_troc:
+    if st.session_state.objet_a:
+        obj_a = st.session_state.objet_a
+        col_a, col_vs, col_b = st.columns([2, 1, 2])
+        with col_a:
+            st.image(obj_a['img'], width=150)
+            st.subheader(obj_a['nom']); st.title(f"{obj_a['prix']:.0f} €")
+        with col_vs: st.title(" 🆚 ")
+        with col_b:
+            if st.session_state.last_scan and st.session_state.last_scan['nom'] != obj_a['nom']:
+                obj_b = st.session_state.last_scan
+                st.image(obj_b['img'], width=150)
+                st.subheader(obj_b['nom']); st.title(f"{obj_b['prix']:.0f} €")
+                diff = obj_a['prix'] - obj_b['prix']
+                if diff > 0: st.error(f"Rajout de {abs(diff):.0f}€ pour B")
+                else: st.success(f"Gain de {abs(diff):.0f}€")
+            else: st.write("Scannez le second objet.")
