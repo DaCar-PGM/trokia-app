@@ -12,26 +12,29 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from webdriver_manager.chrome import ChromeDriverManager
 
-# --- CONFIGURATION ---
+# --- CONFIGURATION DU SITE ---
 st.set_page_config(page_title="Trokia Cloud", page_icon="☁️", layout="wide")
 
-# --- CONNEXION GOOGLE SHEETS ---
+# --- CONNEXION INTELLIGENTE A GOOGLE SHEETS ---
 def connecter_sheets():
-    # On récupère le JSON depuis les secrets Streamlit
     try:
+        # On lit le secret formaté proprement
         json_str = st.secrets["service_account_info"]
         creds_dict = json.loads(json_str)
+        
         scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         client = gspread.authorize(creds)
-        # Ouvre le fichier par son nom (Doit être EXACTEMENT "Trokia_DB")
+        
+        # Ouvre le fichier
         sheet = client.open("Trokia_DB").sheet1
         return sheet
     except Exception as e:
-        st.error(f"Erreur de connexion Google Sheets : {e}")
+        st.error(f"⚠️ Erreur de connexion au Cloud : {e}")
+        st.info("Vérifiez que le fichier Google Sheets s'appelle bien 'Trokia_DB' et que le robot est éditeur.")
         return None
 
-# --- FONCTIONS MÉTIER ---
+# --- IA & SCAN ---
 def deviner_categorie(nom_produit):
     nom = str(nom_produit).lower()
     regles = {
@@ -52,8 +55,8 @@ def configurer_navigateur():
     options.add_argument("--headless=new") 
     options.add_argument("--window-size=1920,1080")
     options.add_argument("--disable-gpu")
-    options.add_argument("--no-sandbox") # Important pour le Cloud
-    options.add_argument("--disable-dev-shm-usage") # Important pour le Cloud
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
     return options
 
 def analyser_produit_ebay(driver, recherche):
@@ -61,7 +64,7 @@ def analyser_produit_ebay(driver, recherche):
     driver.get(url)
     time.sleep(2)
     
-    image_url = "https://via.placeholder.com/150"
+    image_url = "https://via.placeholder.com/150?text=No+Image"
     try:
         img_element = driver.find_element(By.CSS_SELECTOR, "div.s-item__image-wrapper img")
         src = img_element.get_attribute("src")
@@ -80,99 +83,116 @@ def analyser_produit_ebay(driver, recherche):
     prix_final = sum(prix_liste) / len(prix_liste) if prix_liste else 0
     return prix_final, image_url
 
-# --- INTERFACE ---
+# --- INTERFACE UTILISATEUR ---
 st.title("💎 Trokia Cloud : Master System")
 
-# Connexion DB
+# 1. Connexion
 sheet = connecter_sheets()
-if not sheet:
-    st.stop()
+if not sheet: st.stop()
 
-# Lecture des données existantes
+# 2. Récupération des données
 try:
     data = sheet.get_all_records()
     df = pd.DataFrame(data)
-    # Si le fichier est vide, on initialise les colonnes
-    if df.empty:
-        df = pd.DataFrame(columns=["Date", "Produit", "Estimation", "Prix Achat", "Catégorie", "Image"])
+    # Initialisation si vide
+    cols_requises = ["Date", "Produit", "Estimation", "Prix Achat", "Catégorie", "Image"]
+    if df.empty or not all(col in df.columns for col in cols_requises):
+        df = pd.DataFrame(columns=cols_requises)
 except:
     df = pd.DataFrame(columns=["Date", "Produit", "Estimation", "Prix Achat", "Catégorie", "Image"])
 
 col_scan, col_kpi = st.columns([1, 2])
 
-# ZONE DE SCAN
+# GAUCHE : SCANNER
 with col_scan:
     st.markdown("### ☁️ Scanner Cloud")
-    entree = st.text_input("Produit à scanner", key="input_scan")
+    entree = st.text_input("Rechercher un produit", key="input_scan")
     
-    if st.button("Analyser 🚀", use_container_width=True):
+    if st.button("Lancer l'Analyse 🚀", use_container_width=True):
         if entree:
-            with st.spinner("Recherche mondiale..."):
-                service = Service(ChromeDriverManager().install())
-                options = configurer_navigateur()
-                driver = webdriver.Chrome(service=service, options=options)
+            with st.spinner("Analyse du marché en cours..."):
                 try:
+                    service = Service(ChromeDriverManager().install())
+                    driver = webdriver.Chrome(service=service, options=configurer_navigateur())
                     prix, img = analyser_produit_ebay(driver, entree)
+                    driver.quit()
+                    
                     st.session_state.temp_prix = prix
                     st.session_state.temp_img = img
                     st.session_state.temp_produit = entree
                 except Exception as e:
-                    st.error(f"Erreur: {e}")
-                finally:
-                    driver.quit()
+                    st.error(f"Erreur technique : {e}")
 
     if 'temp_prix' in st.session_state and st.session_state.temp_prix > 0:
         valeur = round(st.session_state.temp_prix, 2)
+        
         c1, c2 = st.columns([1, 2])
         with c1:
-            st.image(st.session_state.temp_img, width=100)
+            st.image(st.session_state.temp_img, caption="Aperçu", width=120)
         with c2:
             st.success(f"Cote : **{valeur} €**")
             prix_achat = st.number_input("Prix d'achat (€)", min_value=0.0, step=1.0, key="achat_input")
             
-        if st.button("💾 Enregistrer dans le Cloud", use_container_width=True):
+        if st.button("💾 Sauvegarder (Google Sheets)", use_container_width=True):
             cat = deviner_categorie(st.session_state.temp_produit)
             date_now = datetime.now().strftime("%Y-%m-%d %H:%M")
             
-            # Ajout Google Sheets
-            nouvelle_ligne = [date_now, st.session_state.temp_produit, valeur, prix_achat, cat, st.session_state.temp_img]
+            # Préparation de la ligne
+            # Note : on force la conversion en float pour Google Sheets
+            nouvelle_ligne = [
+                date_now, 
+                st.session_state.temp_produit, 
+                str(valeur).replace('.', ','), 
+                str(prix_achat).replace('.', ','), 
+                cat, 
+                st.session_state.temp_img
+            ]
             
-            # Si c'est la première ligne et qu'il n'y a pas d'en-tête, on ajoute l'en-tête d'abord
+            # Si vide, on met les titres d'abord
             if df.empty:
                  sheet.append_row(["Date", "Produit", "Estimation", "Prix Achat", "Catégorie", "Image"])
             
             sheet.append_row(nouvelle_ligne)
             
-            st.toast("Sauvegardé sur Google Drive !", icon="☁️")
-            # Reset
+            st.toast("Produit ajouté à la base de données !", icon="☁️")
             del st.session_state.temp_prix
             time.sleep(1)
             st.rerun()
 
-# DASHBOARD
+# DROITE : DASHBOARD
 with col_kpi:
-    st.markdown("### 📊 Données Temps Réel (Google Sheets)")
+    st.markdown("### 📊 Données Temps Réel")
     
     if not df.empty and "Estimation" in df.columns:
-        # Nettoyage des données numériques (parfois Google envoie des strings)
-        df["Estimation"] = pd.to_numeric(df["Estimation"], errors='coerce').fillna(0)
-        df["Prix Achat"] = pd.to_numeric(df["Prix Achat"], errors='coerce').fillna(0)
-        
-        total_valeur = df["Estimation"].sum()
-        total_investi = df["Prix Achat"].sum()
+        # Nettoyage des données pour les calculs (remplace virgules par points)
+        try:
+            df["Estimation_Calc"] = df["Estimation"].astype(str).str.replace(',', '.').astype(float)
+            df["Achat_Calc"] = df["Prix Achat"].astype(str).str.replace(',', '.').astype(float)
+        except:
+            df["Estimation_Calc"] = 0.0
+            df["Achat_Calc"] = 0.0
+            
+        total_valeur = df["Estimation_Calc"].sum()
+        total_investi = df["Achat_Calc"].sum()
         profit = total_valeur - total_investi
         
+        # KPI
         k1, k2, k3 = st.columns(3)
-        k1.metric("Stock Cloud", f"{round(total_valeur, 2)} €")
-        k2.metric("Investi", f"{round(total_investi, 2)} €")
-        k3.metric("PROFIT", f"{round(profit, 2)} €")
+        k1.metric("Valeur Stock", f"{round(total_valeur, 2)} €")
+        k2.metric("Investissement", f"{round(total_investi, 2)} €")
+        k3.metric("PROFIT NET", f"{round(profit, 2)} €", delta=f"{round((profit/total_investi)*100) if total_investi>0 else 0}%")
         
-        # Graphique
-        if "Catégorie" in df.columns:
-            chart_data = df.groupby("Catégorie")["Estimation"].sum()
-            st.bar_chart(chart_data, color="#3498DB")
-            
-        # Tableau
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        # Tableau avec Images
+        st.markdown("---")
+        st.dataframe(
+            df[["Date", "Produit", "Estimation", "Prix Achat", "Catégorie", "Image"]],
+            column_config={
+                "Image": st.column_config.ImageColumn("Aperçu", width="small"),
+                "Estimation": st.column_config.NumberColumn("Cote (€)"),
+                "Prix Achat": st.column_config.NumberColumn("Achat (€)"),
+            },
+            use_container_width=True,
+            hide_index=True
+        )
     else:
-        st.info("La base de données est vide. Scannez votre premier objet !")
+        st.info("👋 Bienvenue ! Scannez votre premier objet pour initialiser la base de données.")
