@@ -1,396 +1,178 @@
 import streamlit as st
-import google.generativeai as genai
-from PIL import Image
 import pandas as pd
 import json
-# Si tu n'utilises pas encore gspread / Google Sheets, tu peux commenter ces imports
-# import gspread
-# from oauth2client.service_account import ServiceAccountCredentials
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime
 import time
 import re
-import requests
-from bs4 import BeautifulSoup
-from duckduckgo_search import DDGS
-import statistics
-import random
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from webdriver_manager.chrome import ChromeDriverManager
 
-# =========================
-#  CONFIGURATION STREAMLIT
-# =========================
+# --- CONFIGURATION ---
+st.set_page_config(page_title="Trokia Cloud", page_icon="☁️", layout="wide")
 
-st.set_page_config(
-    page_title="Trokia v19.0 : Argus & Troc",
-    page_icon="💎",
-    layout="wide"
-)
-
-# Liste de User-Agents pour limiter les blocages
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
-]
-
-# =========================
-#  1. MOTEUR IA (GEMINI)
-# =========================
-
-@st.cache_resource(show_spinner=False)
-def obtenir_meilleur_modele():
-    """
-    Choisit le meilleur modèle Gemini disponible avec generateContent.
-    Utilise la clé stockée dans st.secrets["GEMINI_API_KEY"].
-    """
+# --- CONNEXION GOOGLE SHEETS ---
+def connecter_sheets():
+    # On récupère le JSON depuis les secrets Streamlit
     try:
-        api_key = st.secrets["GEMINI_API_KEY"]
-    except KeyError:
-        st.error("⚠️ GEMINI_API_KEY manquant dans st.secrets.")
-        return "gemini-1.5-flash"
+        json_str = st.secrets["service_account_info"]
+        creds_dict = json.loads(json_str)
+        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        client = gspread.authorize(creds)
+        # Ouvre le fichier par son nom (Doit être EXACTEMENT "Trokia_DB")
+        sheet = client.open("Trokia_DB").sheet1
+        return sheet
+    except Exception as e:
+        st.error(f"Erreur de connexion Google Sheets : {e}")
+        return None
 
-    try:
-        genai.configure(api_key=api_key)
-        models = [
-            m.name
-            for m in genai.list_models()
-            if "generateContent" in m.supported_generation_methods
-        ]
-        for candidate in ["models/gemini-1.5-pro", "models/gemini-1.5-flash"]:
-            if candidate in models:
-                return candidate
-        if models:
-            return models[0]
-        return "gemini-1.5-flash"
-    except Exception:
-        return "gemini-1.5-flash"
-
-
-def analyser_objet_expert(image_pil: Image.Image) -> dict:
-    """
-    Analyse l'image avec Gemini pour extraire :
-    - NOM
-    - CAT (catégorie)
-    - MAT (matériaux)
-    Retourne un dict avec des valeurs par défaut en cas de problème.
-    """
-    default_res = {
-        "nom": "Objet Inconnu",
-        "cat": "AUTRE",
-        "mat": "N/A",
-        "etat": "3",
-        "score": "5",
+# --- FONCTIONS MÉTIER ---
+def deviner_categorie(nom_produit):
+    nom = str(nom_produit).lower()
+    regles = {
+        "🎮 Gaming": ["ps5", "ps4", "switch", "nintendo", "xbox", "jeu", "zelda", "mario", "manette", "console", "gameboy", "game boy", "pokemon", "sega"],
+        "📱 Téléphonie": ["iphone", "samsung", "galaxy", "xiaomi", "redmi", "pixel", "huawei", "smartphone", "oppo", "nokia"],
+        "💻 Informatique": ["macbook", "dell", "hp", "asus", "lenovo", "ordinateur", "pc", "laptop", "clavier", "souris", "usb", "ipad", "tablette", "geforce", "nvidia"],
+        "📸 Photo/Vidéo": ["canon", "nikon", "sony alpha", "gopro", "camera", "objectif", "instax", "lumix", "kodak"],
+        "📚 Livres/Culture": ["livre", "roman", "bd", "manga", "tome", "album", "cd", "dvd", "blu-ray", "vinyle", "collector"],
+        "👟 Mode/Luxe": ["nike", "adidas", "jordan", "yeezy", "sac", "montre", "rolex", "seiko", "vêtement", "gucci", "vuitton"],
+        "🏠 Maison/Électro": ["aspirateur", "dyson", "cafetière", "robot", "cuisine", "outil", "bricolage", "bosch", "makita"]
     }
+    for categorie, mots_cles in regles.items():
+        if any(mot in nom for mot in mots_cles): return categorie
+    return "📦 Divers"
 
+def configurer_navigateur():
+    options = Options()
+    options.add_argument("--headless=new") 
+    options.add_argument("--window-size=1920,1080")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--no-sandbox") # Important pour le Cloud
+    options.add_argument("--disable-dev-shm-usage") # Important pour le Cloud
+    return options
+
+def analyser_produit_ebay(driver, recherche):
+    url = "https://www.ebay.fr/sch/i.html?_nkw=" + recherche.replace(" ", "+") + "&LH_Sold=1&LH_Complete=1"
+    driver.get(url)
+    time.sleep(2)
+    
+    image_url = "https://via.placeholder.com/150"
     try:
-        model_name = obtenir_meilleur_modele()
-        model = genai.GenerativeModel(model_name)
+        img_element = driver.find_element(By.CSS_SELECTOR, "div.s-item__image-wrapper img")
+        src = img_element.get_attribute("src")
+        if src: image_url = src
+    except: pass
 
-        prompt = (
-            "En tant qu'expert produits d'occasion, analyse cette image. "
-            "Identifie la marque et le modèle exacts si possible. "
-            "Sois précis sur les matériaux. "
-            "Réponds dans le format STRICT suivant : "
-            "NOM: ... | CAT: ... | MAT: ... | ETAT: ... | SCORE: ..."
-        )
-
-        response = model.generate_content([prompt, image_pil])
-        t = (response.text or "").strip()
-
-        res = default_res.copy()
-        if "NOM:" in t:
-            res["nom"] = t.split("NOM:")[1].split("|")[0].strip()
-        if "CAT:" in t:
-            res["cat"] = t.split("CAT:")[1].split("|")[0].strip()
-        if "MAT:" in t:
-            res["mat"] = t.split("MAT:")[1].split("|")[0].strip()
-        if "ETAT:" in t:
-            res["etat"] = t.split("ETAT:")[1].split("|")[0].strip()
-        if "SCORE:" in t:
-            res["score"] = t.split("SCORE:")[1].split("|")[0].strip()
-
-        return res
-    except Exception as e:
-        st.warning(f"⚠️ Analyse image impossible : {str(e)[:80]}")
-        return default_res
-
-
-# =========================
-#  2. MOTEUR DE PRIX
-# =========================
-
-def clean_price(val_str: str):
-    """
-    Nettoie une chaîne et renvoie un float ou None.
-    Gère '299', '299,00', '299.00', '299 €', etc.
-    """
-    if not val_str:
-        return None
-
-    # Enlève tout sauf les chiffres, les points et les virgules
-    val_str = re.sub(r"[^\d,\.]", "", val_str)
-
-    if not val_str:
-        return None
-
-    # Unifier virgule en point
-    val_str = val_str.replace(",", ".")
-
-    try:
-        return float(val_str)
-    except ValueError:
-        return None
-
-
-def scan_global_cote(nom: str):
-    """
-    Cherche des prix de vente pour `nom` :
-    - eBay ventes terminées
-    - résultats textuels via DuckDuckGo (Leboncoin, Vinted, etc.)
-    Retourne (cote_médiane, liquidité_texte, url_ebay).
-    """
-    prices = []
-
-    try:
-        clean_name = re.sub(r"[^\w\s]", " ", nom).strip()
-        if not clean_name:
-            return 0, "Nom vide", ""
-
-        query = clean_name.replace(" ", "+")
-        headers = {
-            "User-Agent": random.choice(USER_AGENTS),
-            "Accept-Language": "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-            "Connection": "keep-alive",
-        }
-
-        # ---------- 2.1 eBay ventes terminées ----------
-        url_ebay = (
-            "https://www.ebay.fr/sch/i.html"
-            f"?_nkw={query}&LH_Sold=1&LH_Complete=1&rt=nc"
-        )
-
+    texte = driver.find_element(By.TAG_NAME, "body").text
+    motifs = re.findall(r"(\d+[\.,]?\d*)\s*EUR", texte)
+    prix_liste = []
+    for p in motifs:
         try:
-            r = requests.get(url_ebay, headers=headers, timeout=10)
-            r.raise_for_status()
-            soup = BeautifulSoup(r.text, "html.parser")
+            val = float(p.replace(',', '.').strip())
+            if 1 < val < 10000: prix_liste.append(val)
+        except: continue
+    
+    prix_final = sum(prix_liste) / len(prix_liste) if prix_liste else 0
+    return prix_final, image_url
 
-            selectors = [
-                ".s-item__price",
-                ".s-item__detail--primary span",
-                ".s-item__detail span",
-            ]
+# --- INTERFACE ---
+st.title("💎 Trokia Cloud : Master System")
 
-            ebay_prices_raw = []
-            for sel in selectors:
-                for tag in soup.select(sel):
-                    txt = tag.get_text(strip=True)
-                    if "€" in txt or "eur" in txt.lower():
-                        ebay_prices_raw.append(txt)
+# Connexion DB
+sheet = connecter_sheets()
+if not sheet:
+    st.stop()
 
-            for txt in ebay_prices_raw:
-                p = clean_price(txt)
-                if p and 1 < p < 10000:
-                    prices.append(p)
+# Lecture des données existantes
+try:
+    data = sheet.get_all_records()
+    df = pd.DataFrame(data)
+    # Si le fichier est vide, on initialise les colonnes
+    if df.empty:
+        df = pd.DataFrame(columns=["Date", "Produit", "Estimation", "Prix Achat", "Catégorie", "Image"])
+except:
+    df = pd.DataFrame(columns=["Date", "Produit", "Estimation", "Prix Achat", "Catégorie", "Image"])
 
-        except Exception as e:
-            st.info(f"ℹ️ eBay non exploitable: {str(e)[:80]}")
+col_scan, col_kpi = st.columns([1, 2])
 
-        # ---------- 2.2 DuckDuckGo (Leboncoin / Vinted) ----------
-        try:
-            ddg_query = f"\"{clean_name}\" prix vendu site:leboncoin.fr OR site:vinted.fr"
+# ZONE DE SCAN
+with col_scan:
+    st.markdown("### ☁️ Scanner Cloud")
+    entree = st.text_input("Produit à scanner", key="input_scan")
+    
+    if st.button("Analyser 🚀", use_container_width=True):
+        if entree:
+            with st.spinner("Recherche mondiale..."):
+                service = Service(ChromeDriverManager().install())
+                options = configurer_navigateur()
+                driver = webdriver.Chrome(service=service, options=options)
+                try:
+                    prix, img = analyser_produit_ebay(driver, entree)
+                    st.session_state.temp_prix = prix
+                    st.session_state.temp_img = img
+                    st.session_state.temp_produit = entree
+                except Exception as e:
+                    st.error(f"Erreur: {e}")
+                finally:
+                    driver.quit()
 
-            ddg_prices_raw = []
-            with DDGS() as ddgs:
-                for res in ddgs.text(ddg_query, max_results=20):
-                    body = (res.get("body") or "").lower()
-                    title = (res.get("title") or "").lower()
-                    # Regex prix : capte 123, 123.45, 123,45, 1 234,00, etc.
-                    pattern = r"(\d{1,4}[\s\.,]?\d{0,2})\s?(?:€|eur|euros?)"
-                    matches = re.findall(pattern, body) + re.findall(pattern, title)
-                    ddg_prices_raw.extend(matches)
-
-            for txt in ddg_prices_raw:
-                p = clean_price(txt)
-                if p and 1 < p < 10000:
-                    prices.append(p)
-
-        except Exception as e:
-            st.info(f"ℹ️ DuckDuckGo non exploitable: {str(e)[:80]}")
-
-        # ---------- 2.3 Calcul de la cote ----------
-        if not prices:
-            return 0, "Aucune donnée de prix fiable trouvée", url_ebay
-
-        cote = statistics.median(prices)
-        nb = len(prices)
-
-        if nb > 20:
-            liq = "🔥 Très élevée"
-        elif nb > 10:
-            liq = "🔥 Élevée"
-        elif nb >= 3:
-            liq = "Moyenne"
-        else:
-            liq = "❄️ Faible"
-
-        return round(cote, 2), liq, url_ebay
-
-    except Exception as e:
-        return 0, f"Erreur globale: {str(e)[:80]}", ""
-
-
-def get_thumbnail(query: str) -> str:
-    """
-    Récupère une miniature via DuckDuckGo Images.
-    Fallback: placeholder.
-    """
-    try:
-        with DDGS() as ddgs:
-            results = list(ddgs.images(keywords=query, region="fr-fr", max_results=1))
-            if results:
-                return results[0].get("image", "https://via.placeholder.com/150")
-            return "https://via.placeholder.com/150"
-    except Exception:
-        return "https://via.placeholder.com/150"
-
-
-# =========================
-#  3. GESTION D'ÉTAT
-# =========================
-
-if "objet_a" not in st.session_state:
-    st.session_state.objet_a = None
-
-if "last_scan" not in st.session_state:
-    st.session_state.last_scan = None
-
-
-def reset_all():
-    st.session_state.objet_a = None
-    st.session_state.last_scan = None
-    st.rerun()
-
-
-# =========================
-#  4. INTERFACE STREAMLIT
-# =========================
-
-st.title("💎 Trokia : L'Argus Universel")
-
-if st.button("🔄 Remise à zéro complète", use_container_width=True):
-    reset_all()
-
-tab_photo, tab_manuel, tab_troc = st.tabs(
-    ["📸 Scan Photo", "⌨️ Clavier / EAN", "⚖️ Balance d'Échange"]
-)
-
-# ---------- Onglet 1 : Scan Photo ----------
-with tab_photo:
-    col_l, col_r = st.columns([1, 2])
-
-    with col_l:
-        f = st.camera_input("Scanner un produit")
-        if not f:
-            f = st.file_uploader("Ou importer une image", type=["jpg", "jpeg", "png"])
-
-    if f is not None:
-        with st.spinner("Analyse de l'image et recherche de prix..."):
-            image_pil = Image.open(f)
-            data = analyser_objet_expert(image_pil)
-            cote, liq, url_ebay = scan_global_cote(data["nom"])
-            thumb = get_thumbnail(data["nom"])
-
-            st.session_state.last_scan = {
-                "nom": data["nom"],
-                "prix": cote,
-                "img": thumb,
-                "mat": data["mat"],
-            }
-
-        with col_r:
-            st.header(data["nom"])
-            st.write(f"Catégorie : {data['cat']} | Matériaux : {data['mat']}")
-            st.write(f"État (IA) : {data['etat']} / 5 | Score : {data['score']} / 5")
-
-            if cote > 0:
-                st.metric("Valeur estimée", f"{cote:.0f} €", delta=f"Liquidité : {liq}")
-                st.caption(f"Source principale : eBay ventes terminées. URL : {url_ebay}")
-            else:
-                st.error("⚠️ Impossible d'estimer un prix fiable avec les sources actuelles.")
-
-            if st.button("⚖️ Ajouter au TROC (Slot A)", key="add_photo"):
-                st.session_state.objet_a = st.session_state.last_scan
-                st.success("✅ Objet ajouté comme référence pour le troc (Slot A).")
-
-# ---------- Onglet 2 : Saisie manuelle ----------
-with tab_manuel:
-    with st.form("manual_form"):
-        q_in = st.text_input(
-            "Saisir nom ou Code-Barre",
-            placeholder="Ex: iPhone 11 64 Go",
-        )
-        btn_search = st.form_submit_button("🔎 Estimer la valeur")
-
-    if btn_search and q_in:
-        with st.spinner("Recherche de prix sur le web..."):
-            cote, liq, url_ebay = scan_global_cote(q_in)
-            img = get_thumbnail(q_in)
-
-            st.session_state.last_scan = {
-                "nom": q_in,
-                "prix": cote,
-                "img": img,
-                "mat": "Manuel",
-            }
-
+    if 'temp_prix' in st.session_state and st.session_state.temp_prix > 0:
+        valeur = round(st.session_state.temp_prix, 2)
         c1, c2 = st.columns([1, 2])
-        c1.image(img, width=150)
+        with c1:
+            st.image(st.session_state.temp_img, width=100)
         with c2:
-            st.subheader(q_in)
-            if cote > 0:
-                st.metric("Valeur marché", f"{cote:.0f} €", delta=liq)
-                st.caption(f"Source principale : eBay + autres sites. URL eBay : {url_ebay}")
-            else:
-                st.error("Aucun prix exploitable trouvé pour cette recherche.")
+            st.success(f"Cote : **{valeur} €**")
+            prix_achat = st.number_input("Prix d'achat (€)", min_value=0.0, step=1.0, key="achat_input")
+            
+        if st.button("💾 Enregistrer dans le Cloud", use_container_width=True):
+            cat = deviner_categorie(st.session_state.temp_produit)
+            date_now = datetime.now().strftime("%Y-%m-%d %H:%M")
+            
+            # Ajout Google Sheets
+            nouvelle_ligne = [date_now, st.session_state.temp_produit, valeur, prix_achat, cat, st.session_state.temp_img]
+            
+            # Si c'est la première ligne et qu'il n'y a pas d'en-tête, on ajoute l'en-tête d'abord
+            if df.empty:
+                 sheet.append_row(["Date", "Produit", "Estimation", "Prix Achat", "Catégorie", "Image"])
+            
+            sheet.append_row(nouvelle_ligne)
+            
+            st.toast("Sauvegardé sur Google Drive !", icon="☁️")
+            # Reset
+            del st.session_state.temp_prix
+            time.sleep(1)
+            st.rerun()
 
-            if st.button("⚖️ Ajouter au TROC (Slot A)", key="add_manual"):
-                st.session_state.objet_a = st.session_state.last_scan
-                st.success("✅ Objet mémorisé comme Slot A.")
-
-# ---------- Onglet 3 : Balance d'Échange ----------
-with tab_troc:
-    if st.session_state.objet_a:
-        obj_a = st.session_state.objet_a
-
-        col_a, col_vs, col_b = st.columns([2, 1, 2])
-
-        with col_a:
-            st.image(obj_a["img"], width=150)
-            st.subheader(obj_a["nom"])
-            st.title(f"{obj_a['prix']:.0f} €")
-
-        with col_vs:
-            st.title("🆚")
-
-        with col_b:
-            if (
-                st.session_state.last_scan
-                and st.session_state.last_scan["nom"] != obj_a["nom"]
-            ):
-                obj_b = st.session_state.last_scan
-                st.image(obj_b["img"], width=150)
-                st.subheader(obj_b["nom"])
-                st.title(f"{obj_b['prix']:.0f} €")
-
-                diff = obj_a["prix"] - obj_b["prix"]
-
-                if diff > 0:
-                    st.error(f"L'autre doit rajouter {abs(diff):.0f} € pour un troc équitable.")
-                elif diff < 0:
-                    st.success(f"Vous avez un avantage de {abs(diff):.0f} € dans cet échange.")
-                else:
-                    st.info("Échange parfaitement équitable.")
-            else:
-                st.write("Scannez ou estimez un second objet pour compléter la comparaison.")
+# DASHBOARD
+with col_kpi:
+    st.markdown("### 📊 Données Temps Réel (Google Sheets)")
+    
+    if not df.empty and "Estimation" in df.columns:
+        # Nettoyage des données numériques (parfois Google envoie des strings)
+        df["Estimation"] = pd.to_numeric(df["Estimation"], errors='coerce').fillna(0)
+        df["Prix Achat"] = pd.to_numeric(df["Prix Achat"], errors='coerce').fillna(0)
+        
+        total_valeur = df["Estimation"].sum()
+        total_investi = df["Prix Achat"].sum()
+        profit = total_valeur - total_investi
+        
+        k1, k2, k3 = st.columns(3)
+        k1.metric("Stock Cloud", f"{round(total_valeur, 2)} €")
+        k2.metric("Investi", f"{round(total_investi, 2)} €")
+        k3.metric("PROFIT", f"{round(profit, 2)} €")
+        
+        # Graphique
+        if "Catégorie" in df.columns:
+            chart_data = df.groupby("Catégorie")["Estimation"].sum()
+            st.bar_chart(chart_data, color="#3498DB")
+            
+        # Tableau
+        st.dataframe(df, use_container_width=True, hide_index=True)
     else:
-        st.info("Aucun objet dans le Slot A. Ajoutez-en un via l'onglet Photo ou Clavier.")
+        st.info("La base de données est vide. Scannez votre premier objet !")
