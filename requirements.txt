@@ -3,3 +3,5 @@ selenium
 pandas
 openpyxl
 webdriver-manager
+gspread
+oauth2client
