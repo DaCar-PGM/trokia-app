@@ -14,118 +14,135 @@ from duckduckgo_search import DDGS
 import statistics
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="Trokia v17 : Argus Universel", page_icon="⚖️", layout="wide")
+st.set_page_config(page_title="Trokia v18 : Full Access", page_icon="💎", layout="wide")
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
 
-# --- 1. IA EXPERT MULTI-CRITÈRES ---
-def analyser_objet_expert(image_pil, modele):
+# --- 1. IA & VISUELS ---
+def analyser_objet_expert(image_pil, modele_ia):
+    default_res = {"nom": "Objet Inconnu", "cat": "AUTRE", "mat": "N/A", "etat": "3", "score": "5"}
     try:
-        model = genai.GenerativeModel(modele)
-        # Prompt enrichi pour les meubles et la qualité
+        if modele_ia is None: return default_res
+        model = genai.GenerativeModel(modele_ia)
         prompt = (
-            "Analyse cet objet d'occasion. Donne :\n"
-            "1. NOM PRÉCIS : Marque et Modèle.\n"
-            "2. CATÉGORIE : MEUBLE, TECH, VETEMENT, JEU, ou AUTRE.\n"
-            "3. MATÉRIAUX : (ex: Bois massif, Cuir, Plastique).\n"
-            "4. ÉTAT VISUEL : (Échelle 1-5).\n"
-            "5. SCORE DÉSIRABILITÉ : (Échelle 1-10).\n"
+            "Analyse l'image. Donne le NOM PRÉCIS, la CATÉGORIE (MEUBLE, TECH, VETEMENT, JEU, AUTRE), "
+            "les MATÉRIAUX, l'ÉTAT visuel (1-5) et un SCORE de désirabilité (1-10).\n"
             "Format : NOM: ... | CAT: ... | MAT: ... | ETAT: ... | SCORE: ..."
         )
         response = model.generate_content([prompt, image_pil])
         t = response.text.strip()
-        
-        res = {"nom": "Inconnu", "cat": "AUTRE", "mat": "N/A", "etat": "3", "score": "5"}
+        res = default_res.copy()
         if "NOM:" in t: res["nom"] = t.split("NOM:")[1].split("|")[0].strip()
         if "CAT:" in t: res["cat"] = t.split("CAT:")[1].split("|")[0].strip()
         if "MAT:" in t: res["mat"] = t.split("MAT:")[1].split("|")[0].strip()
         if "ETAT:" in t: res["etat"] = t.split("ETAT:")[1].split("|")[0].strip()
         if "SCORE:" in t: res["score"] = t.split("SCORE:")[1].strip()
         return res
-    except: return None
+    except: return default_res
 
 def get_thumbnail(query):
     try:
-        results = DDGS().images(keywords=query, region="fr-fr", max_results=1)
-        return results[0]['image'] if results else "https://via.placeholder.com/150"
+        with DDGS() as ddgs:
+            results = list(ddgs.images(keywords=query, region="fr-fr", max_results=1))
+            return results[0]['image'] if results else "https://via.placeholder.com/150"
     except: return "https://via.placeholder.com/150"
 
-# --- 2. MOTEURS DE PRIX & LIQUIDITÉ ---
-def scan_global_cote(nom, cat):
-    """Analyse multicritère pour sortir une cote béton"""
+# --- 2. MOTEUR DE PRIX ---
+def scan_global_cote(nom, cat="AUTRE"):
     try:
-        # eBay pour la cote historique
         clean = re.sub(r'[^\w\s]', '', nom).strip()
+        # eBay Ventes Terminées
         url_ebay = f"https://www.ebay.fr/sch/i.html?_nkw={clean.replace(' ', '+')}&LH_Sold=1&LH_Complete=1"
         r = requests.get(url_ebay, headers=HEADERS, timeout=5)
-        prices = [float(p.replace(",", ".").replace(" ", "")) for p in re.findall(r"(?:EUR|€)\s*([\d\s\.,]+)|([\d\s\.,]+)\s*(?:EUR|€)", r.text) for x in p if x and 2 < float(x.replace(",", ".").replace(" ", "")) < 8000]
+        prices = [float(p.replace(",", ".").replace(" ", "")) for p in re.findall(r"(?:EUR|€)\s*([\d\s\.,]+)|([\d\s\.,]+)\s*(?:EUR|€)", r.text) if p]
         
-        # DDG pour l'offre actuelle (Leboncoin/Vinted)
-        results_web = DDGS().text(f"site:leboncoin.fr OR site:vinted.fr {nom}", max_results=10)
+        # Web (LBC/Vinted)
         web_prices = []
-        if results_web:
+        with DDGS() as ddgs:
+            results_web = list(ddgs.text(f"site:leboncoin.fr OR site:vinted.fr {nom}", max_results=8))
             for res in results_web:
                 p = re.findall(r"(\d+[\.,]?\d*)\s?(?:€|eur)", res.get('body', '').lower())
                 if p: web_prices.append(float(p[0].replace(",", ".")))
 
-        total_prices = prices + web_prices
-        cote = statistics.median(total_prices) if total_prices else 0
-        
-        # Calcul Liquidité (Volume de vente vs Volume d'offre)
-        liquidite = "Moyenne"
-        if len(prices) > 15: liquidite = "🔥 Très Fluide"
-        elif len(prices) < 3: liquidite = "❄️ Difficile"
-        
-        return cote, liquidite, url_ebay
+        total = [p for p in prices + web_prices if 1 < p < 8000]
+        cote = statistics.median(total) if total else 0
+        liq = "🔥 Très Fluide" if len(total) > 12 else ("❄️ Difficile" if len(total) < 3 else "Moyenne")
+        return cote, liq, url_ebay
     except: return 0, "Inconnue", ""
 
-# --- 3. UI & GESTION ÉCHANGE ---
-if 'objet_a' not in st.session_state: st.session_state.objet_a = None
-if 'last_scan' not in st.session_state: st.session_state.last_scan = None
-
+# --- 3. CONFIG & DATA ---
 def configurer_modele():
     try:
-        genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+        api_key = st.secrets["GEMINI_API_KEY"]
+        genai.configure(api_key=api_key)
         return "gemini-1.5-flash"
     except: return None
 
-st.title("⚖️ Trokia v17 : L'Argus Universel")
+def connecter_sheets():
+    try:
+        json_str = st.secrets["service_account_info"]
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(json.loads(json_str), ["https://spreadsheets.google.com/feeds"])
+        return gspread.authorize(creds).open("Trokia_DB").sheet1
+    except: return None
 
-tab_scan, tab_troc = st.tabs(["🔍 Analyse & Expertise", "⚖️ Simulateur d'Échange"])
+# --- 4. INTERFACE ---
+if 'objet_a' not in st.session_state: st.session_state.objet_a = None
+if 'last_scan' not in st.session_state: st.session_state.last_scan = None
 
-with tab_scan:
+sheet = connecter_sheets()
+model_ia = configurer_modele()
+
+st.title("💎 Trokia v18 : Expert Omnicanal")
+
+# TABS : Retour de la recherche manuelle !
+tab_photo, tab_manuel, tab_troc = st.tabs(["📸 Scan Photo", "⌨️ Clavier / EAN", "⚖️ Balance d'Échange"])
+
+# --- TAB 1 : PHOTO ---
+with tab_photo:
     col_l, col_r = st.columns([1, 2])
     with col_l:
-        f = st.camera_input("Scanner un objet")
-        if not f: f = st.file_uploader("Ou charger une image", type=['jpg', 'png'])
-
+        f = st.camera_input("Scanner un produit")
+        if not f: f = st.file_uploader("Ou importer", type=['jpg', 'png'])
+    
     if f:
-        with st.spinner("Analyse Expertise en cours..."):
-            model = configurer_modele()
-            data = analyser_objet_expert(Image.open(f), model)
+        with st.spinner("Analyse visuelle..."):
+            data = analyser_objet_expert(Image.open(f), model_ia)
             cote, liq, url = scan_global_cote(data['nom'], data['cat'])
-            st.session_state.last_scan = {"nom": data['nom'], "prix": cote, "img": get_thumbnail(data['nom'])}
-
-        with col_r:
-            st.header(f"{data['nom']}")
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Cote Estimée", f"{cote:.0f} €")
-            c2.metric("Liquidité", liq)
-            c3.metric("État Visuel", f"{data['etat']}/5")
+            st.session_state.last_scan = {"nom": data['nom'], "prix": cote, "img": get_thumbnail(data['nom']), "cat": data['cat']}
             
-            with st.expander("📝 Détails de l'Expertise"):
-                st.write(f"**Catégorie :** {data['cat']}")
-                st.write(f"**Matériaux détectés :** {data['mat']}")
-                st.write(f"**Score Désirabilité :** {data['score']}/10")
-                if data['cat'] == "MEUBLE":
-                    st.warning("💡 Note Meuble : La valeur dépend fortement du transport. Prix hors livraison.")
-            
-            if st.button("⚖️ Utiliser pour un ÉCHANGE", use_container_width=True):
-                st.session_state.objet_a = st.session_state.last_scan
-                st.success(f"{data['nom']} ajouté comme 'Objet A' dans le Troc !")
+            with col_r:
+                st.header(f"{data['nom']}")
+                st.metric("Cote Estimée", f"{cote:.0f} €", delta=liq)
+                st.write(f"**Matériaux :** {data['mat']} | **Désirabilité :** {data['score']}/10")
+                
+                if st.button("⚖️ Ajouter à la balance (A)", key="add_a_photo"):
+                    st.session_state.objet_a = st.session_state.last_scan
+                    st.success("Ajouté au Slot A")
 
+# --- TAB 2 : MANUEL (LE RETOUR) ---
+with tab_manuel:
+    st.info("💡 Tapez un nom ou scannez un Code-Barre EAN.")
+    with st.form("manual_search"):
+        q_in = st.text_input("Recherche", placeholder="Ex: iPhone 13 ou 314589123456...")
+        btn_search = st.form_submit_button("🔎 Lancer l'estimation")
+    
+    if btn_search and q_in:
+        with st.spinner(f"Recherche de : {q_in}..."):
+            cote, liq, url = scan_global_cote(q_in)
+            img = get_thumbnail(q_in)
+            st.session_state.last_scan = {"nom": q_in, "prix": cote, "img": img, "cat": "MANUEL"}
+            
+            c1, c2 = st.columns([1, 2])
+            c1.image(img, width=150)
+            with c2:
+                st.subheader(q_in)
+                st.metric("Prix Marché", f"{cote:.0f} €", delta=liq)
+                if st.button("⚖️ Ajouter à la balance (A)", key="add_a_manual"):
+                    st.session_state.objet_a = st.session_state.last_scan
+                    st.success("Ajouté au Slot A")
+
+# --- TAB 3 : TROC ---
 with tab_troc:
-    st.header("Simulateur de Troc Intelligent")
     if st.session_state.objet_a:
         obj_a = st.session_state.objet_a
         col_a, col_vs, col_b = st.columns([2, 1, 2])
@@ -134,12 +151,10 @@ with tab_troc:
             st.image(obj_a['img'], width=150)
             st.subheader(obj_a['nom'])
             st.title(f"{obj_a['prix']:.0f} €")
-            st.caption("Votre objet (Slot A)")
+            st.caption("OBJET A")
             
         with col_vs:
-            st.write("")
-            st.write("")
-            st.title(" 🆚 ")
+            st.write("### VS")
             
         with col_b:
             if st.session_state.last_scan and st.session_state.last_scan['nom'] != obj_a['nom']:
@@ -147,20 +162,25 @@ with tab_troc:
                 st.image(obj_b['img'], width=150)
                 st.subheader(obj_b['nom'])
                 st.title(f"{obj_b['prix']:.0f} €")
-                st.caption("Objet proposé (Slot B)")
+                st.caption("OBJET B")
                 
-                st.divider()
                 diff = obj_a['prix'] - obj_b['prix']
-                if diff > 0:
-                    st.error(f"⚠️ Échange défavorable.\n\nDemandez un rajout de **{abs(diff):.0f} €**")
-                elif diff < 0:
-                    st.success(f"✅ Très bon deal !\n\nVous gagnez **{abs(diff):.0f} €** de valeur.")
-                else:
-                    st.info("🤝 Échange équitable (Perfect Match).")
+                if diff > 0: st.error(f"Rajout de {abs(diff):.0f}€ pour B")
+                elif diff < 0: st.success(f"Gain de {abs(diff):.0f}€ pour vous")
+                else: st.info("Équitable")
             else:
-                st.info("Scannez le second objet dans l'onglet 'Analyse' pour comparer.")
+                st.write("Scannez un 2ème objet.")
+        
+        if st.button("🗑️ Reset Balance"):
+            st.session_state.objet_a = None
+            st.rerun()
     else:
-        st.warning("Commencez par scanner un premier objet.")
+        st.info("Scannez un premier objet pour commencer.")
 
 st.divider()
-st.caption("Trokia v17 - IA & Data Market en temps réel.")
+if st.session_state.last_scan:
+    if st.button("💾 Sauvegarder le dernier scan dans Google Sheets"):
+        if sheet:
+            ls = st.session_state.last_scan
+            sheet.append_row([datetime.now().strftime("%d/%m %H:%M"), ls['nom'], ls['prix'], ls.get('cat','-'), ls['img']])
+            st.success("Enregistré !")
