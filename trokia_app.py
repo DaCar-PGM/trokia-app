@@ -14,23 +14,43 @@ from duckduckgo_search import DDGS
 import statistics
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="Trokia v18 : Full Access", page_icon="💎", layout="wide")
+st.set_page_config(page_title="Trokia v18.2 : Stealth Intelligence", page_icon="💎", layout="wide")
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
 
-# --- 1. IA & VISUELS ---
-def analyser_objet_expert(image_pil, modele_ia):
+# --- 1. MOTEUR IA INVISIBLE (MULTI-MODÈLES) ---
+def obtenir_meilleur_modele():
+    """Détermine en arrière-plan le meilleur modèle disponible pour la précision"""
+    try:
+        api_key = st.secrets["GEMINI_API_KEY"]
+        genai.configure(api_key=api_key)
+        models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        # Priorité au modèle Pro pour la précision 'Pico Bello'
+        for m in ["models/gemini-1.5-pro", "models/gemini-1.5-flash", "models/gemini-pro"]:
+            if m in models:
+                return m
+        return models[0]
+    except:
+        return "gemini-1.5-flash"
+
+def analyser_objet_expert(image_pil):
+    """Analyse profonde en arrière-plan croisant visuel et expertise"""
     default_res = {"nom": "Objet Inconnu", "cat": "AUTRE", "mat": "N/A", "etat": "3", "score": "5"}
     try:
-        if modele_ia is None: return default_res
-        model = genai.GenerativeModel(modele_ia)
+        target_model = obtenir_meilleur_modele()
+        model = genai.GenerativeModel(target_model)
+        
+        # Le prompt est maintenant ultra-directif pour forcer l'IA à croiser ses connaissances
         prompt = (
-            "Analyse l'image. Donne le NOM PRÉCIS, la CATÉGORIE (MEUBLE, TECH, VETEMENT, JEU, AUTRE), "
-            "les MATÉRIAUX, l'ÉTAT visuel (1-5) et un SCORE de désirabilité (1-10).\n"
-            "Format : NOM: ... | CAT: ... | MAT: ... | ETAT: ... | SCORE: ..."
+            "En tant qu'expert en expertise d'objets, analyse cette image. "
+            "Identifie précisément la marque, le modèle et les matériaux (ex: chêne massif vs plaqué). "
+            "Évalue l'état d'usage et la rareté sur le marché."
+            "\nFormat de sortie STRICT : NOM: ... | CAT: ... | MAT: ... | ETAT: ... | SCORE: ..."
         )
+        
         response = model.generate_content([prompt, image_pil])
         t = response.text.strip()
+        
         res = default_res.copy()
         if "NOM:" in t: res["nom"] = t.split("NOM:")[1].split("|")[0].strip()
         if "CAT:" in t: res["cat"] = t.split("CAT:")[1].split("|")[0].strip()
@@ -38,8 +58,10 @@ def analyser_objet_expert(image_pil, modele_ia):
         if "ETAT:" in t: res["etat"] = t.split("ETAT:")[1].split("|")[0].strip()
         if "SCORE:" in t: res["score"] = t.split("SCORE:")[1].strip()
         return res
-    except: return default_res
+    except:
+        return default_res
 
+# --- 2. VISUELS & RECHERCHE ---
 def get_thumbnail(query):
     try:
         with DDGS() as ddgs:
@@ -47,11 +69,10 @@ def get_thumbnail(query):
             return results[0]['image'] if results else "https://via.placeholder.com/150"
     except: return "https://via.placeholder.com/150"
 
-# --- 2. MOTEUR DE PRIX ---
-def scan_global_cote(nom, cat="AUTRE"):
+def scan_global_cote(nom):
     try:
         clean = re.sub(r'[^\w\s]', '', nom).strip()
-        # eBay Ventes Terminées
+        # eBay (Ventes terminées)
         url_ebay = f"https://www.ebay.fr/sch/i.html?_nkw={clean.replace(' ', '+')}&LH_Sold=1&LH_Complete=1"
         r = requests.get(url_ebay, headers=HEADERS, timeout=5)
         prices = [float(p.replace(",", ".").replace(" ", "")) for p in re.findall(r"(?:EUR|€)\s*([\d\s\.,]+)|([\d\s\.,]+)\s*(?:EUR|€)", r.text) if p]
@@ -70,14 +91,7 @@ def scan_global_cote(nom, cat="AUTRE"):
         return cote, liq, url_ebay
     except: return 0, "Inconnue", ""
 
-# --- 3. CONFIG & DATA ---
-def configurer_modele():
-    try:
-        api_key = st.secrets["GEMINI_API_KEY"]
-        genai.configure(api_key=api_key)
-        return "gemini-1.5-flash"
-    except: return None
-
+# --- 3. DATA & CONFIG ---
 def connecter_sheets():
     try:
         json_str = st.secrets["service_account_info"]
@@ -90,14 +104,12 @@ if 'objet_a' not in st.session_state: st.session_state.objet_a = None
 if 'last_scan' not in st.session_state: st.session_state.last_scan = None
 
 sheet = connecter_sheets()
-model_ia = configurer_modele()
 
-st.title("💎 Trokia v18 : Expert Omnicanal")
+st.title("💎 Trokia : L'Argus Universel")
 
-# TABS : Retour de la recherche manuelle !
 tab_photo, tab_manuel, tab_troc = st.tabs(["📸 Scan Photo", "⌨️ Clavier / EAN", "⚖️ Balance d'Échange"])
 
-# --- TAB 1 : PHOTO ---
+# --- TAB 1 : PHOTO (IA EXPERTISE SILENCIEUSE) ---
 with tab_photo:
     col_l, col_r = st.columns([1, 2])
     with col_l:
@@ -105,29 +117,28 @@ with tab_photo:
         if not f: f = st.file_uploader("Ou importer", type=['jpg', 'png'])
     
     if f:
-        with st.spinner("Analyse visuelle..."):
-            data = analyser_objet_expert(Image.open(f), model_ia)
-            cote, liq, url = scan_global_cote(data['nom'], data['cat'])
+        with st.spinner("Analyse approfondie en cours..."):
+            data = analyser_objet_expert(Image.open(f))
+            cote, liq, url = scan_global_cote(data['nom'])
             st.session_state.last_scan = {"nom": data['nom'], "prix": cote, "img": get_thumbnail(data['nom']), "cat": data['cat']}
             
             with col_r:
                 st.header(f"{data['nom']}")
-                st.metric("Cote Estimée", f"{cote:.0f} €", delta=liq)
+                st.metric("Valeur Marché", f"{cote:.0f} €", delta=liq)
                 st.write(f"**Matériaux :** {data['mat']} | **Désirabilité :** {data['score']}/10")
                 
-                if st.button("⚖️ Ajouter à la balance (A)", key="add_a_photo"):
+                if st.button("⚖️ Utiliser pour un TROC (Slot A)", key="add_a_photo"):
                     st.session_state.objet_a = st.session_state.last_scan
-                    st.success("Ajouté au Slot A")
+                    st.success("Objet mémorisé.")
 
-# --- TAB 2 : MANUEL (LE RETOUR) ---
+# --- TAB 2 : MANUEL ---
 with tab_manuel:
-    st.info("💡 Tapez un nom ou scannez un Code-Barre EAN.")
     with st.form("manual_search"):
-        q_in = st.text_input("Recherche", placeholder="Ex: iPhone 13 ou 314589123456...")
-        btn_search = st.form_submit_button("🔎 Lancer l'estimation")
+        q_in = st.text_input("Saisir nom ou EAN", placeholder="Ex: Montre Omega ou 314589123456")
+        btn_search = st.form_submit_button("🔎 Estimer")
     
     if btn_search and q_in:
-        with st.spinner(f"Recherche de : {q_in}..."):
+        with st.spinner("Calcul de la cote..."):
             cote, liq, url = scan_global_cote(q_in)
             img = get_thumbnail(q_in)
             st.session_state.last_scan = {"nom": q_in, "prix": cote, "img": img, "cat": "MANUEL"}
@@ -136,10 +147,10 @@ with tab_manuel:
             c1.image(img, width=150)
             with c2:
                 st.subheader(q_in)
-                st.metric("Prix Marché", f"{cote:.0f} €", delta=liq)
-                if st.button("⚖️ Ajouter à la balance (A)", key="add_a_manual"):
+                st.metric("Prix Estimé", f"{cote:.0f} €", delta=liq)
+                if st.button("⚖️ Utiliser pour un TROC (Slot A)", key="add_a_manual"):
                     st.session_state.objet_a = st.session_state.last_scan
-                    st.success("Ajouté au Slot A")
+                    st.success("Objet mémorisé.")
 
 # --- TAB 3 : TROC ---
 with tab_troc:
@@ -154,7 +165,7 @@ with tab_troc:
             st.caption("OBJET A")
             
         with col_vs:
-            st.write("### VS")
+            st.title(" 🆚 ")
             
         with col_b:
             if st.session_state.last_scan and st.session_state.last_scan['nom'] != obj_a['nom']:
@@ -165,22 +176,23 @@ with tab_troc:
                 st.caption("OBJET B")
                 
                 diff = obj_a['prix'] - obj_b['prix']
-                if diff > 0: st.error(f"Rajout de {abs(diff):.0f}€ pour B")
-                elif diff < 0: st.success(f"Gain de {abs(diff):.0f}€ pour vous")
+                if diff > 0: st.error(f"Défavorable : B doit rajouter {abs(diff):.0f}€")
+                elif diff < 0: st.success(f"Favorable : Vous gagnez {abs(diff):.0f}€")
                 else: st.info("Équitable")
             else:
-                st.write("Scannez un 2ème objet.")
+                st.write("Scannez un second objet.")
         
-        if st.button("🗑️ Reset Balance"):
+        if st.button("🗑️ Reset Troc"):
             st.session_state.objet_a = None
             st.rerun()
     else:
-        st.info("Scannez un premier objet pour commencer.")
+        st.info("Sélectionnez un premier objet pour la balance.")
 
+# --- SAUVEGARDE ---
 st.divider()
 if st.session_state.last_scan:
-    if st.button("💾 Sauvegarder le dernier scan dans Google Sheets"):
+    if st.button("💾 Enregistrer dans le Cloud"):
         if sheet:
             ls = st.session_state.last_scan
-            sheet.append_row([datetime.now().strftime("%d/%m %H:%M"), ls['nom'], ls['prix'], ls.get('cat','-'), ls['img']])
-            st.success("Enregistré !")
+            sheet.append_row([datetime.now().strftime("%d/%m %H:%M"), ls['nom'], ls['prix'], ls['cat'], ls['img']])
+            st.success("Synchronisé !")
