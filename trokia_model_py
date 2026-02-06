@@ -1,25 +1,134 @@
 import streamlit as st
 import google.generativeai as genai
+from PIL import Image
+import re
+import requests
+from bs4 import BeautifulSoup
+from duckduckgo_search import DDGS
+import statistics
+import random
 
-st.title("🧪 Testeur de modèles Trokia")
+# --- CONFIGURATION ---
+st.set_page_config(page_title="Trokia v19.2 : Multi-IA", page_icon="⚖️", layout="wide")
 
-# Configuration via tes secrets
-try:
-    api_key = st.secrets["GEMINI_API_KEY"]
-    genai.configure(api_key=api_key)
-    
-    st.write("### 🧠 Modèles disponibles pour ta clé :")
-    
-    # On interroge Google pour avoir la liste
-    available_models = genai.list_models()
-    
-    for m in available_models:
-        # On filtre pour ne voir que les modèles qui peuvent analyser du texte/images
-        if 'generateContent' in m.supported_generation_methods:
-            col1, col2 = st.columns([1, 2])
-            col1.code(m.name)
-            col2.caption(m.description)
-            st.divider()
+# --- LISTE DES MODÈLES SOUHAITÉS (ORDRE DE PRIORITÉ) ---
+MODELS_PRIORITY = [
+    "models/gemini-2.5-pro", "models/gemini-3-pro-preview", "models/gemini-2.0-flash",
+    "models/gemini-exp-1206", "models/gemini-1.5-pro", "models/gemini-1.5-flash"
+]
 
-except Exception as e:
-    st.error(f"Erreur de connexion : {e}")
+# --- MOTEUR IA FURTIF (ARRIÈRE-PLAN) ---
+def obtenir_meilleur_cerveau():
+    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+    available = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+    # On cherche le premier modèle de TA liste qui est disponible sur TA clé
+    for target in MODELS_PRIORITY:
+        if target in available: return target
+    return "models/gemini-1.5-flash" # Secours ultime
+
+def analyser_objet_furtif(images_pil):
+    try:
+        model_name = obtenir_meilleur_cerveau()
+        model = genai.GenerativeModel(model_name)
+        
+        prompt = (
+            "Analyse ces images pour un vendeur ou acheteur. Identifie l'objet précisément "
+            "(Vêtement, Meuble, Jeu, Électronique, etc.). Détermine la marque, le modèle exact et les matériaux. "
+            "Propose les 5 variantes ou modèles les plus probables pour que l'utilisateur confirme.\n"
+            "Format STRICT :\n1. Nom Modèle 1\n2. Nom Modèle 2\n3. Nom Modèle 3\n4. Nom Modèle 4\n5. Nom Modèle 5"
+        )
+        
+        response = model.generate_content([prompt] + images_pil)
+        lines = response.text.strip().split('\n')
+        return [re.sub(r'^\d+\.\s*', '', l).strip() for l in lines if l and l[0].isdigit()][:5]
+    except Exception as e:
+        return [f"Erreur Analyse: {str(e)[:20]}"]
+
+def get_ref_image(query):
+    try:
+        with DDGS() as ddgs:
+            results = list(ddgs.images(keywords=query, region="fr-fr", max_results=1))
+            return results[0]['image'] if results else "https://via.placeholder.com/150"
+    except: return "https://via.placeholder.com/150"
+
+# --- MOTEUR DE PRIX (ANTI-0€) ---
+def extraire_cote_reelle(nom):
+    prices = []
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+    try:
+        url = f"https://www.ebay.fr/sch/i.html?_nkw={nom.replace(' ', '+')}&LH_Sold=1&LH_Complete=1"
+        r = requests.get(url, headers=headers, timeout=10)
+        soup = BeautifulSoup(r.text, 'html.parser')
+        for tag in soup.select('.s-item__price'):
+            p_raw = tag.get_text().replace('\xa0', '').replace(' ', '').replace('EUR', '').replace('€', '')
+            match = re.search(r'(\d+[\.,]?\d*)', p_raw)
+            if match:
+                val = float(match.group(1).replace(',', '.'))
+                if 2 < val < 20000: prices.append(val)
+    except: pass
+    return (statistics.median(prices) if prices else 0), ("Élevée" if len(prices) > 8 else "Moyenne")
+
+# --- INTERFACE ---
+if 'step' not in st.session_state: st.session_state.step = "input"
+
+st.sidebar.title("💎 Trokia Pro")
+if st.sidebar.button("🔄 Remise à zéro complète"):
+    for key in list(st.session_state.keys()): del st.session_state[key]
+    st.session_state.step = "input"
+    st.rerun()
+
+st.title("⚖️ L'Argus Universel")
+
+if st.session_state.step == "input":
+    st.write("### 1. Analyse de l'objet (Vente ou Achat)")
+    files = st.file_uploader("Insérez jusqu'à 5 photos pour une expertise multi-modèles", type=['jpg','png','jpeg'], accept_multiple_files=True)
+    
+    st.divider()
+    q_man = st.text_input("Ou saisissez manuellement le modèle ou l'EAN")
+    
+    if st.button("Lancer l'Analyse 🚀", type="primary"):
+        if files:
+            with st.spinner("Les modèles IA analysent votre objet en arrière-plan..."):
+                imgs = [Image.open(f) for f in files[:5]]
+                st.session_state.props = analyser_objet_furtif(imgs)
+                st.session_state.imgs_ref = [get_ref_image(p) for p in st.session_state.props]
+                st.session_state.step = "selection"
+                st.rerun()
+        elif q_man:
+            st.session_state.nom_final = q_man
+            st.session_state.step = "resultat"
+            st.rerun()
+
+elif st.session_state.step == "selection":
+    st.write("### 2. Est-ce l'un de ces 5 modèles ?")
+    st.caption("L'IA a identifié ces variantes. Cliquez sur la photo exacte pour valider l'Argus.")
+    
+    cols = st.columns(5) # Passage à 5 colonnes
+    for i, col in enumerate(cols):
+        if i < len(st.session_state.props):
+            with col:
+                st.image(st.session_state.imgs_ref[i], use_container_width=True)
+                if st.button(f"Sélectionner :\n{st.session_state.props[i]}", key=f"btn_{i}"):
+                    st.session_state.nom_final = st.session_state.props[i]
+                    st.session_state.step = "resultat"
+                    st.rerun()
+
+elif st.session_state.step == "resultat":
+    nom = st.session_state.nom_final
+    with st.spinner(f"Calcul de la valeur pour {nom}..."):
+        cote, fiab = extraire_cote_reelle(nom)
+        img_fin = get_ref_image(nom)
+    
+    c1, c2 = st.columns([1, 2])
+    with c1: st.image(img_fin, use_container_width=True)
+    with c2:
+        st.header(nom)
+        if cote > 0:
+            st.metric("VALEUR ESTIMÉE", f"{cote:.2f} €")
+            st.info(f"Indice de fiabilité du marché : {fiab}")
+        else:
+            st.warning("Prix non trouvé. Essayez une recherche plus large.")
+        
+        if st.button("🔙 Nouvelle expertise"):
+            st.session_state.step = "input"
+            st.rerun()
