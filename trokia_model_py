@@ -9,40 +9,38 @@ import statistics
 import random
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="Trokia v19.2 : Multi-IA", page_icon="⚖️", layout="wide")
+st.set_page_config(page_title="Trokia v19.3 : Prix Vendus Uniquement", page_icon="⚖️", layout="wide")
 
-# --- LISTE DES MODÈLES SOUHAITÉS (ORDRE DE PRIORITÉ) ---
+# --- LISTE DES MODÈLES IA SOUHAITÉS ---
 MODELS_PRIORITY = [
-    "models/gemini-2.5-pro", "models/gemini-3-pro-preview", "models/gemini-2.0-flash",
-    "models/gemini-exp-1206", "models/gemini-1.5-pro", "models/gemini-1.5-flash"
+    "models/gemini-2.5-pro", "models/gemini-2.0-flash", "models/gemini-2.0-flash-001",
+    "models/gemini-2.0-flash-lite", "models/gemini-exp-1206", "models/gemini-pro-latest"
 ]
 
-# --- MOTEUR IA FURTIF (ARRIÈRE-PLAN) ---
+# --- 1. MOTEUR IA FURTIF (TRAVAILLE EN ARRIÈRE-PLAN) ---
 def obtenir_meilleur_cerveau():
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-    available = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-    # On cherche le premier modèle de TA liste qui est disponible sur TA clé
-    for target in MODELS_PRIORITY:
-        if target in available: return target
-    return "models/gemini-1.5-flash" # Secours ultime
+    try:
+        available = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        for target in MODELS_PRIORITY:
+            if target in available: return target
+        return "models/gemini-1.5-flash"
+    except: return "models/gemini-1.5-flash"
 
 def analyser_objet_furtif(images_pil):
+    """Analyse l'objet via les modèles IA en arrière-plan"""
     try:
-        model_name = obtenir_meilleur_cerveau()
-        model = genai.GenerativeModel(model_name)
-        
+        model = genai.GenerativeModel(obtenir_meilleur_cerveau())
         prompt = (
-            "Analyse ces images pour un vendeur ou acheteur. Identifie l'objet précisément "
-            "(Vêtement, Meuble, Jeu, Électronique, etc.). Détermine la marque, le modèle exact et les matériaux. "
-            "Propose les 5 variantes ou modèles les plus probables pour que l'utilisateur confirme.\n"
+            "Analyse ces photos pour identifier l'objet (Vêtement, Meuble, Jeu, etc.). "
+            "Détermine marque, modèle exact et matériaux. "
+            "Propose les 5 modèles ou variantes les plus probables pour confirmation.\n"
             "Format STRICT :\n1. Nom Modèle 1\n2. Nom Modèle 2\n3. Nom Modèle 3\n4. Nom Modèle 4\n5. Nom Modèle 5"
         )
-        
         response = model.generate_content([prompt] + images_pil)
         lines = response.text.strip().split('\n')
         return [re.sub(r'^\d+\.\s*', '', l).strip() for l in lines if l and l[0].isdigit()][:5]
-    except Exception as e:
-        return [f"Erreur Analyse: {str(e)[:20]}"]
+    except: return ["Analyse indisponible"]
 
 def get_ref_image(query):
     try:
@@ -51,24 +49,37 @@ def get_ref_image(query):
             return results[0]['image'] if results else "https://via.placeholder.com/150"
     except: return "https://via.placeholder.com/150"
 
-# --- MOTEUR DE PRIX (ANTI-0€) ---
-def extraire_cote_reelle(nom):
+# --- 2. MOTEUR DE PRIX : PARAMÈTRE "VENDUS UNIQUEMENT" ---
+def extraire_cote_vendus_uniquement(nom):
+    """Calcule la cote en utilisant exclusivement les transactions terminées"""
     prices = []
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+    
     try:
-        url = f"https://www.ebay.fr/sch/i.html?_nkw={nom.replace(' ', '+')}&LH_Sold=1&LH_Complete=1"
+        # Paramètres eBay : LH_Sold=1 (Vendu) et LH_Complete=1 (Terminé)
+        # C'est ce paramètre qui garantit que l'on ne regarde pas les annonces en cours.
+        clean_q = nom.replace(' ', '+')
+        url = f"https://www.ebay.fr/sch/i.html?_nkw={clean_q}&LH_Sold=1&LH_Complete=1"
+        
         r = requests.get(url, headers=headers, timeout=10)
         soup = BeautifulSoup(r.text, 'html.parser')
+        
+        # On extrait les prix des objets réellement vendus
         for tag in soup.select('.s-item__price'):
             p_raw = tag.get_text().replace('\xa0', '').replace(' ', '').replace('EUR', '').replace('€', '')
             match = re.search(r'(\d+[\.,]?\d*)', p_raw)
             if match:
                 val = float(match.group(1).replace(',', '.'))
-                if 2 < val < 20000: prices.append(val)
+                # Filtre de sécurité pour éviter les accessoires ou erreurs de saisie
+                if 2 < val < 25000: prices.append(val)
     except: pass
-    return (statistics.median(prices) if prices else 0), ("Élevée" if len(prices) > 8 else "Moyenne")
+    
+    # On utilise la médiane pour obtenir le prix de vente le plus représentatif
+    cote = statistics.median(prices) if prices else 0
+    fiabilite = "Haute (Transactions réelles)" if len(prices) > 8 else "Moyenne"
+    return cote, fiabilite
 
-# --- INTERFACE ---
+# --- 3. INTERFACE ---
 if 'step' not in st.session_state: st.session_state.step = "input"
 
 st.sidebar.title("💎 Trokia Pro")
@@ -77,18 +88,18 @@ if st.sidebar.button("🔄 Remise à zéro complète"):
     st.session_state.step = "input"
     st.rerun()
 
-st.title("⚖️ L'Argus Universel")
+st.title("⚖️ L'Argus Universel (Prix Vendus)")
 
 if st.session_state.step == "input":
-    st.write("### 1. Analyse de l'objet (Vente ou Achat)")
-    files = st.file_uploader("Insérez jusqu'à 5 photos pour une expertise multi-modèles", type=['jpg','png','jpeg'], accept_multiple_files=True)
+    st.write("### 1. Analyse de l'objet")
+    files = st.file_uploader("Insérez jusqu'à 5 photos pour expertise", type=['jpg','png','jpeg'], accept_multiple_files=True)
     
     st.divider()
-    q_man = st.text_input("Ou saisissez manuellement le modèle ou l'EAN")
+    q_man = st.text_input("Ou saisissez manuellement le modèle (Ex: iPhone 12)")
     
     if st.button("Lancer l'Analyse 🚀", type="primary"):
         if files:
-            with st.spinner("Les modèles IA analysent votre objet en arrière-plan..."):
+            with st.spinner("Analyse multi-modèles en cours..."):
                 imgs = [Image.open(f) for f in files[:5]]
                 st.session_state.props = analyser_objet_furtif(imgs)
                 st.session_state.imgs_ref = [get_ref_image(p) for p in st.session_state.props]
@@ -100,23 +111,21 @@ if st.session_state.step == "input":
             st.rerun()
 
 elif st.session_state.step == "selection":
-    st.write("### 2. Est-ce l'un de ces 5 modèles ?")
-    st.caption("L'IA a identifié ces variantes. Cliquez sur la photo exacte pour valider l'Argus.")
-    
-    cols = st.columns(5) # Passage à 5 colonnes
+    st.write("### 2. Confirmez votre modèle")
+    cols = st.columns(5)
     for i, col in enumerate(cols):
         if i < len(st.session_state.props):
             with col:
                 st.image(st.session_state.imgs_ref[i], use_container_width=True)
-                if st.button(f"Sélectionner :\n{st.session_state.props[i]}", key=f"btn_{i}"):
+                if st.button(f"C'est celui-ci :\n{st.session_state.props[i]}", key=f"btn_{i}"):
                     st.session_state.nom_final = st.session_state.props[i]
                     st.session_state.step = "resultat"
                     st.rerun()
 
 elif st.session_state.step == "resultat":
     nom = st.session_state.nom_final
-    with st.spinner(f"Calcul de la valeur pour {nom}..."):
-        cote, fiab = extraire_cote_reelle(nom)
+    with st.spinner(f"Calcul de la cote (ventes terminées uniquement) pour {nom}..."):
+        cote, fiab = extraire_cote_vendus_uniquement(nom)
         img_fin = get_ref_image(nom)
     
     c1, c2 = st.columns([1, 2])
@@ -124,10 +133,10 @@ elif st.session_state.step == "resultat":
     with c2:
         st.header(nom)
         if cote > 0:
-            st.metric("VALEUR ESTIMÉE", f"{cote:.2f} €")
-            st.info(f"Indice de fiabilité du marché : {fiab}")
+            st.metric("PRIX DE VENTE RÉEL", f"{cote:.2f} €")
+            st.success(f"Cette cote est basée exclusivement sur des transactions finalisées ({fiab}).")
         else:
-            st.warning("Prix non trouvé. Essayez une recherche plus large.")
+            st.warning("Aucune transaction vendue trouvée pour ce modèle précis.")
         
         if st.button("🔙 Nouvelle expertise"):
             st.session_state.step = "input"
